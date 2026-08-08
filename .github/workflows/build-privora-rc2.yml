@@ -115,7 +115,16 @@ jobs:
             git ca-certificates unzip live-build debootstrap squashfs-tools xorriso \
             syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
             dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
-            dpkg-dev python3 gzip coreutils
+            dpkg-dev python3 gzip coreutils gcc binutils file
+
+          # ci/validate.sh builds the PrivoraKernel research target as a source-integrity gate.
+          # Keep the toolchain explicit so the minimal Debian container fails early and clearly.
+          for tool in gcc ld readelf nm file; do
+            command -v "$tool" >/dev/null || { echo "ERROR: required validation tool missing: $tool" >&2; exit 127; }
+          done
+          gcc --version | head -n1
+          ld --version | head -n1
+
           apt-get clean
           rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
           df -h / /work
