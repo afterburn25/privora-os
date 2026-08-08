@@ -1,0 +1,99 @@
+name: Build Privora 4.0 RC2 Installer ISO
+
+on:
+  workflow_dispatch:
+
+jobs:
+  installer-amd64:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:13
+      options: --privileged
+    timeout-minutes: 240
+
+    steps:
+      - name: Install Debian 13 build tools
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            git ca-certificates unzip live-build debootstrap squashfs-tools xorriso \
+            syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
+            dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
+            qemu-system-x86 qemu-utils ovmf dpkg-dev python3 gzip coreutils
+
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Unpack Privora RC2 source
+        run: |
+          test -f Privora-4.0-RC2-Web-Source.zip
+          rm -rf /work/privora
+          mkdir -p /work/privora
+          unzip -q Privora-4.0-RC2-Web-Source.zip -d /work/privora
+          test "$(cat /work/privora/VERSION)" = "4.0-rc2"
+          chmod -R u+rwX /work/privora
+          find /work/privora -type f -name '*.sh' -exec chmod +x {} +
+
+      - name: Validate source
+        working-directory: /work/privora
+        run: ./ci/validate.sh
+
+      - name: Build installer-first ISO
+        working-directory: /work/privora
+        run: |
+          INSTALLER=1 \
+          OFFLINE_REPO=1 \
+          PERSISTENCE=1 \
+          DESKTOP=plasma \
+          EDITION=standard \
+          ARCHITECTURE=amd64 \
+          ./ci/build-live-iso.sh
+
+      - name: Find and validate ISO
+        working-directory: /work/privora
+        run: |
+          iso=$(find distro -maxdepth 1 -type f -name 'Privora-4.0-rc2-Installer-*.iso' -print -quit)
+          test -n "$iso"
+          ./tools/iso-preflight.py "$iso"
+          echo "ISO=$iso" >> "$GITHUB_ENV"
+
+      - name: BIOS boot smoke test
+        working-directory: /work/privora
+        run: QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" bios
+
+      - name: UEFI boot smoke test
+        working-directory: /work/privora
+        run: QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" uefi
+
+      - name: Disposable-disk installation certification
+        working-directory: /work/privora
+        run: QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
+
+      - name: Prepare downloadable ISO artifact
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          cp "/work/privora/$ISO" "$GITHUB_WORKSPACE/output/"
+          cd "$GITHUB_WORKSPACE/output"
+          sha256sum *.iso > SHA256SUMS.txt
+          cat > FLASH-TO-USB-WINDOWS.txt <<'EOF'
+          PRIVORA 4.0 RC2 - WINDOWS USB FLASHING
+
+          1. Back up anything on the target USB; it will be erased.
+          2. Open Rufus.
+          3. Select the Privora RC2 ISO.
+          4. For a modern PC use GPT + UEFI.
+          5. Write the image and reboot.
+          6. Select the UEFI USB entry from your PC's boot menu.
+          7. Privora boots into the Prism installer-first environment.
+
+          Back up your computer before installing. If Windows uses BitLocker,
+          keep your recovery key available before changing disk partitions.
+          EOF
+
+      - name: Upload Privora RC2 ISO
+        uses: actions/upload-artifact@v4
+        with:
+          name: Privora-4.0-RC2-Installer-Plasma-Standard-amd64
+          path: output/
+          if-no-files-found: error
+          retention-days: 14
