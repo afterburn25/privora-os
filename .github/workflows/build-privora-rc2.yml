@@ -6,67 +6,40 @@ on:
 jobs:
   installer-amd64:
     runs-on: ubuntu-latest
-    container:
-      image: debian:13
-      options: --privileged
-    timeout-minutes: 240
+    timeout-minutes: 300
 
     steps:
-      - name: Configure Debian 13 repositories and i386 multiarch
-        run: |
-          set -eux
-          cat > /etc/apt/sources.list.d/debian.sources <<'SOURCES'
-          Types: deb
-          URIs: http://deb.debian.org/debian
-          Suites: trixie trixie-updates
-          Components: main contrib non-free non-free-firmware
-          Architectures: amd64 i386
-          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-
-          Types: deb
-          URIs: http://deb.debian.org/debian-security
-          Suites: trixie-security
-          Components: main contrib non-free non-free-firmware
-          Architectures: amd64 i386
-          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-          SOURCES
-          dpkg --add-architecture i386
-          apt-get update
-
-      - name: Verify amd64 and i386 gaming package candidates
-        run: |
-          set -eux
-          dpkg --print-architecture
-          dpkg --print-foreign-architectures
-          apt-config dump | grep -E '^APT::Architectures|^APT::Architecture' || true
-          apt-cache policy \
-            lutris steam-installer winetricks \
-            steam-libs-i386:i386 steam-libs:i386 libc6:i386 libgl1:i386
-          test -n "$(apt-cache madison lutris | head -n1)"
-          test -n "$(apt-cache madison steam-installer | head -n1)"
-          test -n "$(apt-cache madison winetricks | head -n1)"
-          test -n "$(apt-cache madison steam-libs-i386:i386 | head -n1)"
-          test -n "$(apt-cache madison steam-libs:i386 | head -n1)"
-
-      - name: Install Debian 13 build tools
-        run: |
-          set -eux
-          DEBIAN_FRONTEND=noninteractive apt-get install -y \
-            git ca-certificates unzip live-build debootstrap squashfs-tools xorriso \
-            syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
-            dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
-            dpkg-dev python3 gzip coreutils
-
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Locate and unpack Privora RC2 source
+      - name: Reclaim runner disk space before build
+        shell: bash
         run: |
-          set -eux
-          echo "Repository files after checkout:"
+          set -euxo pipefail
+          echo 'Disk before cleanup:'
+          df -h /
+
+          # ubuntu-latest includes large SDK stacks that this Linux ISO build does not use.
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/.ghcup || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo apt-get clean || true
+          docker image prune -af || true
+
+          echo 'Disk after cleanup:'
+          df -h /
+
+      - name: Locate and unpack Privora RC2 source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          echo 'Repository files after checkout:'
           find . -maxdepth 4 -type f -printf '%p\n' | sort | sed -n '1,250p'
 
-          SOURCE_ZIP=""
+          SOURCE_ZIP=''
           if [ -f ./Privora-4.0-RC2-Web-Source.zip ]; then
             SOURCE_ZIP=./Privora-4.0-RC2-Web-Source.zip
           else
@@ -76,151 +49,208 @@ jobs:
           fi
 
           if [ -z "$SOURCE_ZIP" ] || [ ! -f "$SOURCE_ZIP" ]; then
-            echo 'ERROR: No Privora RC2 source ZIP was found anywhere in the repository.' >&2
-            echo 'Upload the source ZIP to the repository, commit it, then rerun this workflow.' >&2
+            echo 'ERROR: No Privora RC2 source ZIP was found in the repository.' >&2
             exit 1
           fi
 
           echo "Using Privora source archive: $SOURCE_ZIP"
           unzip -t "$SOURCE_ZIP" >/dev/null
-          rm -rf /work/privora
-          mkdir -p /work/privora
-          unzip -q "$SOURCE_ZIP" -d /work/privora
 
-          # Accept either a flat source ZIP or one containing a single top-level folder.
-          if [ ! -f /work/privora/VERSION ]; then
-            VERSION_FILE="$(find /work/privora -mindepth 2 -maxdepth 3 -type f -name VERSION -print -quit)"
+          BUILDROOT="$RUNNER_TEMP/privora-build"
+          rm -rf "$BUILDROOT"
+          mkdir -p "$BUILDROOT/src" "$BUILDROOT/output"
+          unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
+
+          if [ ! -f "$BUILDROOT/src/VERSION" ]; then
+            VERSION_FILE="$(find "$BUILDROOT/src" -mindepth 2 -maxdepth 3 -type f -name VERSION -print -quit)"
             if [ -n "$VERSION_FILE" ]; then
               SOURCE_ROOT="$(dirname "$VERSION_FILE")"
-              rm -rf /work/privora-flat
-              mkdir -p /work/privora-flat
-              cp -a "$SOURCE_ROOT"/. /work/privora-flat/
-              rm -rf /work/privora
-              mv /work/privora-flat /work/privora
+              mkdir -p "$BUILDROOT/flat"
+              cp -a "$SOURCE_ROOT"/. "$BUILDROOT/flat"/
+              rm -rf "$BUILDROOT/src"
+              mv "$BUILDROOT/flat" "$BUILDROOT/src"
             fi
           fi
 
-          test -f /work/privora/VERSION
-          test "$(tr -d '\r\n' < /work/privora/VERSION)" = "4.0-rc2"
-          chmod -R u+rwX /work/privora
-          find /work/privora -type f -name '*.sh' -exec chmod +x {} +
+          test -f "$BUILDROOT/src/VERSION"
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc2'
+          chmod -R u+rwX "$BUILDROOT/src"
+          find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
+          echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
+          df -h /
 
-      - name: Apply RC2 build compatibility fixes
-        working-directory: /work/privora
+      - name: Start Debian 13 Privora build container
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
+          docker pull debian:13
+          docker run -d --name privora-builder --privileged \
+            -v "$BUILDROOT:/work" \
+            debian:13 sleep infinity
+          docker exec privora-builder bash -lc 'cat /etc/debian_version; df -h / /work'
+
+      - name: Configure Debian 13 build environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cat > /etc/apt/sources.list.d/debian.sources <<'SOURCES'
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: trixie trixie-updates
+          Components: main contrib non-free non-free-firmware
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://deb.debian.org/debian-security
+          Suites: trixie-security
+          Components: main contrib non-free non-free-firmware
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          SOURCES
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            git ca-certificates unzip live-build debootstrap squashfs-tools xorriso \
+            syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
+            dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
+            dpkg-dev python3 gzip coreutils
+          apt-get clean
+          rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+          df -h / /work
+          CONTAINER
+
+      - name: Apply RC2 compatibility and disk-footprint fixes
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
           python3 - <<'PYFIX'
           from pathlib import Path
 
-          repo = Path('tools/build-offline-installer-repo.sh')
-          s = repo.read_text()
-          needle = '  -o APT::Get::Download-Only=true\n  -o APT::Install-Recommends=true\n'
-          repl = ('  -o APT::Architecture=amd64\n'
-                  '  -o APT::Architectures::=amd64\n'
-                  '  -o APT::Architectures::=i386\n'
-                  '  -o APT::Get::Download-Only=true\n'
-                  '  -o APT::Install-Recommends=true\n')
-          if needle not in s:
-              raise SystemExit('offline repository APT options anchor not found')
-          s = s.replace(needle, repl, 1)
+          # Debian 13 PolicyKit package split.
+          for path in Path('.').rglob('*'):
+              if not path.is_file():
+                  continue
+              try:
+                  text = path.read_text()
+              except Exception:
+                  continue
+              if 'policykit-1' in text:
+                  path.write_text(text.replace('policykit-1', 'polkitd pkexec'))
 
-          old_profiles = (
-              '# Build the union of every selectable desktop and application edition. Base/Live\n'
-              '# packages do not need to be repeated; selected profile dependencies do.\n'
-              'mapfile -t packages < <(\n'
-              '  cat "$root"/distro/profiles/desktops/*.list.chroot "$root"/distro/profiles/editions/*.list.chroot |\n'
-              "    sed 's/#.*$//' | awk 'NF{print $1}' | sort -u\n"
-              ')\n'
-          )
-          new_profiles = (
-              '# Build a media-sized offline pool by default.\n'
-              'scope=${OFFLINE_REPO_SCOPE:-selected}\n'
-              'desktop=${DESKTOP:-plasma}\n'
-              'edition=${EDITION:-standard}\n'
-              'case "$scope" in\n'
-              '  selected)\n'
-              '    desktop_file="$root/distro/profiles/desktops/$desktop.list.chroot"\n'
-              '    edition_file="$root/distro/profiles/editions/$edition.list.chroot"\n'
-              '    [[ -f $desktop_file && -f $edition_file ]] || { echo "Unknown selected offline profile" >&2; exit 2; }\n'
-              '    mapfile -t packages < <(cat "$desktop_file" "$edition_file" | sed \'s/#.*$//\' | awk \'NF{print $1}\' | sort -u)\n'
-              '    ;;\n'
-              '  all)\n'
-              '    mapfile -t packages < <(cat "$root"/distro/profiles/desktops/*.list.chroot "$root"/distro/profiles/editions/*.list.chroot | sed \'s/#.*$//\' | awk \'NF{print $1}\' | sort -u)\n'
-              '    ;;\n'
-              '  *) echo "Unsupported OFFLINE_REPO_SCOPE: $scope" >&2; exit 2 ;;\n'
-              'esac\n'
-              'printf \'Offline repository scope: %s (desktop=%s edition=%s)\\n\' "$scope" "$desktop" "$edition"\n'
-          )
-          if old_profiles not in s:
-              raise SystemExit('offline repository profile-union anchor not found')
-          s = s.replace(old_profiles, new_profiles, 1)
+          # Co-installable BIOS/UEFI GRUB module packages for the live environment.
+          for path in Path('.').rglob('*'):
+              if not path.is_file():
+                  continue
+              try:
+                  text = path.read_text()
+              except Exception:
+                  continue
+              new = text.replace('grub-efi-amd64 grub-pc', 'grub-efi-amd64-bin grub-pc-bin grub2-common')
+              new = new.replace('grub-pc grub-efi-amd64', 'grub-pc-bin grub-efi-amd64-bin grub2-common')
+              if new != text:
+                  path.write_text(new)
 
-          old_copy = 'find "$work/archives" -maxdepth 1 -type f -name \'*.deb\' -exec cp -n {} "$out/pool/" \\;\n'
-          new_copy = ('find "$work/archives" -maxdepth 1 -type f -name \'*.deb\' -exec mv -n {} "$out/pool/" \\;\n'
-                      'rm -rf "$work"\n')
-          if old_copy not in s:
-              raise SystemExit('offline repository duplicate-copy anchor not found')
-          s = s.replace(old_copy, new_copy, 1)
-          repo.write_text(s)
-
-          # privora-platform is the canonical owner of backend helper commands.
-          # Older RC2 source accidentally packaged these same two files again in
-          # privora-system-apps, which makes dpkg abort with a file-overwrite error.
+          # privora-platform is canonical owner of these backend helper commands.
           deb_builder = Path('tools/build-first-party-debs.py')
           bs = deb_builder.read_text()
           old_backend = "    'privora-oem','privora-cloud','privora-connect','privora-ai','privora-apply-branding'\n"
           new_backend = "    'privora-oem','privora-cloud','privora-connect','privora-ai','privora-apply-branding',\n    'privora-hardware-compat','privora-update-rollback-plan'\n"
-          if old_backend not in bs:
-              raise SystemExit('privora-system-apps backend ownership anchor not found')
-          deb_builder.write_text(bs.replace(old_backend, new_backend, 1))
+          if old_backend in bs:
+              deb_builder.write_text(bs.replace(old_backend, new_backend, 1))
 
+          # Plasma + Standard dependencies already live inside filesystem.squashfs.
+          # The selected-profile offline repository therefore only needs the two
+          # Privora metapackages instead of duplicating their entire Debian closure.
+          repo = Path('tools/build-offline-installer-repo.sh')
+          repo.write_text("""#!/usr/bin/env bash
+          set -euo pipefail
+          root=$(cd \"$(dirname \"$0\")/..\" && pwd)
+          out=\"$root/distro/config/includes.binary/privora-repo\"
+          desktop=${DESKTOP:-plasma}
+          edition=${EDITION:-standard}
+          rm -rf \"$out\"
+          mkdir -p \"$out/pool\"
+          command -v dpkg-scanpackages >/dev/null || { echo 'dpkg-scanpackages required' >&2; exit 127; }
+          \"$root/tools/build-first-party-debs.py\" >/dev/null
+          cp \"$root\"/release/debs/privora-desktop-${desktop}_*.deb \"$out/pool/\"
+          cp \"$root\"/release/debs/privora-edition-${edition}_*.deb \"$out/pool/\"
+          (
+            cd \"$out\"
+            dpkg-scanpackages pool /dev/null > Packages
+            gzip -9c Packages > Packages.gz
+            sha256sum Packages Packages.gz > SHA256SUMS
+          )
+          printf '%s\\n' \\
+            'Privora 4.0 RC2 selected-profile offline repository.' \\
+            'Plasma + Standard dependencies are already present in the copied live filesystem.' \\
+            > \"$out/README.txt\"
+          printf 'Offline installer repository: %s packages\\n' \"$(find \"$out/pool\" -type f -name '*.deb' | wc -l)\"
+          """)
+
+          # During profile activation, use only the on-media repository. Dependencies
+          # are already installed in the copied Plasma + Standard live filesystem.
           engine = Path('installer/live/privora-install-engine')
-          s = engine.read_text()
-          needle = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
-          repl = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    # Steam on Debian amd64 requires the i386 foreign architecture. Enable it only\n    # when the Gaming profile is selected.\n    if edition=='gaming':\n        cmd(['dpkg','--add-architecture','i386'],chroot=True)\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
-          if needle not in s:
-              raise SystemExit('installer profile-install anchor not found')
-          engine.write_text(s.replace(needle, repl, 1))
+          es = engine.read_text()
+          old = "    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n    cmd(['apt-get','install','-y','--no-install-recommends',f'privora-desktop-{desktop}',f'privora-edition-{edition}'],chroot=True)\n"
+          new = "    offline_opts=['-o','Dir::Etc::sourcelist=/etc/apt/sources.list.d/privora-offline.list','-o','Dir::Etc::sourceparts=-','-o','Acquire::Languages=none']\n    cmd(['apt-get','update']+offline_opts,chroot=True)\n    cmd(['apt-get','install','-y','--no-install-recommends']+offline_opts+[f'privora-desktop-{desktop}',f'privora-edition-{edition}'],chroot=True)\n"
+          if old in es:
+              es = es.replace(old, new, 1)
+          anchor = "    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n"
+          if "dpkg','--add-architecture','i386" not in es and anchor in es:
+              es = es.replace(anchor, anchor + "    if edition=='gaming': cmd(['dpkg','--add-architecture','i386'],chroot=True)\n", 1)
+          engine.write_text(es)
+
+          # Keep APT indexes out of the final live filesystem and explicitly select xz.
+          auto = Path('distro/auto/config')
+          a = auto.read_text()
+          needle = '  --apt-secure true \\\n'
+          if '--apt-indices false' not in a and needle in a:
+              a = a.replace(needle, needle + '  --apt-indices false \\\n  --chroot-squashfs-compression-type xz \\\n', 1)
+          auto.write_text(a)
+
+          # Late cleanup runs inside the chroot before SquashFS generation.
+          hook = Path('distro/config/hooks/live/0999-privora-build-cleanup.hook.chroot')
+          hook.write_text("""#!/bin/sh
+          set -eu
+          apt-get clean || true
+          rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/* /tmp/* /var/tmp/*
+          find /var/log -type f -exec truncate -s 0 {} \\; 2>/dev/null || true
+          """)
+
+          # Avoid creating a second full-size copy of the finished ISO.
+          build = Path('distro/build.sh')
+          b = build.read_text()
+          old_copy = '  cp --reflink=auto "$image" "$out" 2>/dev/null || cp "$image" "$out"\n'
+          if old_copy in b:
+              b = b.replace(old_copy, '  mv "$image" "$out"\n', 1)
+          build.write_text(b)
           PYFIX
-          chmod +x tools/build-offline-installer-repo.sh installer/live/privora-install-engine
+
+          chmod +x tools/build-offline-installer-repo.sh \
+                   installer/live/privora-install-engine \
+                   distro/config/hooks/live/0999-privora-build-cleanup.hook.chroot
           bash -n tools/build-offline-installer-repo.sh
+          bash -n distro/build.sh
+          bash -n distro/auto/config
+          CONTAINER
 
-      - name: Verify Steam multiarch dependency closure with offline-repo resolver settings
-        working-directory: /work/privora
+      - name: Validate Privora source and first-party package ownership
+        shell: bash
         run: |
-          set -eux
-          rm -rf /tmp/privora-apt-check
-          mkdir -p /tmp/privora-apt-check/archives/partial
-          : > /tmp/privora-apt-check/status
-          apt-get \
-            -o Debug::NoLocking=1 \
-            -o Dir::State::status=/tmp/privora-apt-check/status \
-            -o Dir::Cache::archives=/tmp/privora-apt-check/archives \
-            -o APT::Architecture=amd64 \
-            -o APT::Architectures::=amd64 \
-            -o APT::Architectures::=i386 \
-            -o APT::Get::Download-Only=true \
-            -o APT::Install-Recommends=true \
-            -y --download-only install \
-            steam-installer steam-libs-i386:i386 steam-libs:i386
-          test -n "$(find /tmp/privora-apt-check/archives -maxdepth 1 -type f -name 'steam-libs-i386_*_i386.deb' -print -quit)"
-          rm -rf /tmp/privora-apt-check
-          apt-get clean
-          df -h /
-
-      - name: Validate source
-        working-directory: /work/privora
-        run: ./ci/validate.sh
-
-      - name: Verify first-party package file ownership
-        working-directory: /work/privora
-        run: |
-          set -eux
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+          ./ci/validate.sh
           ./tools/build-first-party-debs.py
           python3 - <<'PYOWN'
           from pathlib import Path
           import itertools, subprocess
-
           packages = {}
           for deb in sorted(Path('release/debs').glob('*.deb')):
               out = subprocess.check_output(['dpkg-deb','-c',str(deb)], text=True)
@@ -231,98 +261,102 @@ jobs:
                       continue
                   path = parts[-1]
                   if path.startswith('./'):
-                      path = '/' + path[2:]
+                      path='/' + path[2:]
                   files.add(path)
-              packages[deb.name] = files
-
-          collisions = []
-          for a, b in itertools.combinations(sorted(packages), 2):
+              packages[deb.name]=files
+          collisions=[]
+          for a,b in itertools.combinations(sorted(packages),2):
               for path in sorted(packages[a] & packages[b]):
                   collisions.append((a,b,path))
           if collisions:
-              print('ERROR: first-party .deb file ownership collisions detected:')
-              for a,b,path in collisions:
-                  print(f'  {path}: {a} <-> {b}')
+              for row in collisions:
+                  print('COLLISION:', *row)
               raise SystemExit(1)
-          print(f'PASS: no file ownership collisions across {len(packages)} Privora .deb packages')
+          print(f'PASS: no file ownership collisions across {len(packages)} Privora packages')
           PYOWN
-          dpkg-deb -c release/debs/privora-system-apps_*.deb | grep -F '/usr/bin/privora-hardware-compat' && exit 1 || true
-          dpkg-deb -c release/debs/privora-system-apps_*.deb | grep -F '/usr/bin/privora-update-rollback-plan' && exit 1 || true
-          df -h /
-
-      - name: Disk-space preflight
-        run: |
-          set -eux
-          echo 'Disk availability before live-build:'
-          df -h /
-          du -sh /work/privora 2>/dev/null || true
-          apt-get clean
-          rm -rf /var/cache/apt/archives/*
-          df -h /
+          df -h / /work
+          CONTAINER
 
       - name: Build installer-first ISO
-        working-directory: /work/privora
+        shell: bash
         run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+          echo 'Disk immediately before live-build:'
+          df -h / /work
+          du -sh . distro/config/includes.binary 2>/dev/null || true
           INSTALLER=1 \
           OFFLINE_REPO=1 \
-          OFFLINE_REPO_SCOPE=selected \
           PERSISTENCE=1 \
           DESKTOP=plasma \
           EDITION=standard \
           ARCHITECTURE=amd64 \
           ./ci/build-live-iso.sh
+          echo 'Disk immediately after live-build:'
+          df -h / /work
+          du -sh distro/chroot distro/config/includes.binary/privora-repo 2>/dev/null || true
+          CONTAINER
 
-      - name: Find, validate, and preserve ISO; reclaim build space
-        working-directory: /work/privora
+      - name: Preserve ISO and reclaim live-build workspace
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
           iso=$(find distro -maxdepth 1 -type f -name 'Privora-4.0-rc2-Installer-*.iso' -print -quit)
           test -n "$iso"
           ./tools/iso-preflight.py "$iso"
-          mkdir -p /work/privora-output
-          preserved="/work/privora-output/$(basename "$iso")"
-          cp "$iso" "$preserved"
-          echo "ISO=$preserved" >> "$GITHUB_ENV"
-          echo 'Disk use before live-build cleanup:'
-          df -h /
-          du -sh distro/chroot distro/config/includes.binary/privora-repo release/.offline-repo-work 2>/dev/null || true
+          mkdir -p /work/output
+          mv "$iso" /work/output/
+          sha256sum /work/output/*.iso > /work/output/SHA256SUMS.txt
           (cd distro && lb clean --purge) || true
-          rm -rf distro/chroot distro/binary distro/cache distro/.build distro/config/includes.binary/privora-repo release/.offline-repo-work
-          apt-get clean
-          rm -rf /var/cache/apt/archives/* /tmp/* || true
-          echo 'Disk use after live-build cleanup:'
-          df -h /
+          rm -rf distro/chroot distro/binary distro/cache distro/.build \
+                 distro/config/includes.binary/privora-repo release/.offline-repo-work
+          apt-get clean || true
+          rm -rf /var/cache/apt/archives/* /tmp/* /var/tmp/* || true
+          df -h / /work
+          CONTAINER
 
-      - name: Install QEMU test tools after ISO build
+      - name: Install QEMU and certify BIOS, UEFI, and installation
+        shell: bash
         run: |
-          set -eux
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cat > /etc/apt/sources.list.d/debian.sources <<'SOURCES'
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: trixie trixie-updates
+          Components: main contrib non-free non-free-firmware
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://deb.debian.org/debian-security
+          Suites: trixie-security
+          Components: main contrib non-free non-free-firmware
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          SOURCES
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             qemu-system-x86 qemu-utils ovmf
           apt-get clean
           rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
-          df -h /
+          cd /work/src
+          ISO=$(find /work/output -maxdepth 1 -type f -name '*.iso' -print -quit)
+          test -n "$ISO"
+          QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" bios
+          QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" uefi
+          QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
+          CONTAINER
 
-      - name: BIOS boot smoke test
-        working-directory: /work/privora
-        run: QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" bios
-
-      - name: UEFI boot smoke test
-        working-directory: /work/privora
-        run: QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" uefi
-
-      - name: Disposable-disk installation certification
-        working-directory: /work/privora
-        run: QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
-
-      - name: Prepare downloadable ISO artifact
+      - name: Prepare download instructions
+        shell: bash
         run: |
-          set -eux
-          mkdir -p "$GITHUB_WORKSPACE/output"
-          cp "$ISO" "$GITHUB_WORKSPACE/output/"
-          cd "$GITHUB_WORKSPACE/output"
-          sha256sum *.iso > SHA256SUMS.txt
-          cat > FLASH-TO-USB-WINDOWS.txt <<'TXT'
+          set -euxo pipefail
+          cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'TXT'
           PRIVORA 4.0 RC2 - WINDOWS USB FLASHING
 
           1. Back up anything on the target USB; it will be erased.
@@ -336,11 +370,18 @@ jobs:
           Back up your computer before installing. If Windows uses BitLocker,
           keep your recovery key available before changing disk partitions.
           TXT
+          ls -lh "$BUILDROOT/output"
+          df -h /
 
       - name: Upload Privora RC2 ISO
         uses: actions/upload-artifact@v4
         with:
           name: Privora-4.0-RC2-Installer-Plasma-Standard-amd64
-          path: output/
+          path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Stop build container
+        if: always()
+        shell: bash
+        run: docker rm -f privora-builder 2>/dev/null || true
