@@ -268,6 +268,8 @@ jobs:
           default vesamenu.c32
           prompt 0
           timeout 50
+          ontimeout install
+          serial 0 115200
           ISOCFG
 
           python3 - <<'BOOTCFG'
@@ -300,6 +302,7 @@ jobs:
           iso = Path("distro/config/bootloaders/isolinux/isolinux.cfg").read_text()
           assert "prompt 0" in iso
           assert "timeout 50" in iso
+          assert "ontimeout install" in iso
           m = menu.read_text()
           assert "label install" in m and "menu default" in m
           print("PASS: BIOS ISOLINUX unattended auto-boot configured")
@@ -403,16 +406,30 @@ jobs:
           [[ $# -ge 1 ]] || { echo "Usage: $0 ISO [bios|uefi]" >&2; exit 2; }
           iso=$(readlink -f "$1"); mode=${2:-bios}; timeout_s=${QEMU_TIMEOUT:-600}
           [[ -f $iso ]] || { echo "ISO not found: $iso" >&2; exit 2; }
-          command -v qemu-system-x86_64 >/dev/null || { echo 'qemu-system-x86_64 required' >&2; exit 127; }
-          command -v xorriso >/dev/null || { echo 'xorriso required' >&2; exit 127; }
+          for t in qemu-system-x86_64 xorriso; do
+            command -v "$t" >/dev/null || { echo "$t required" >&2; exit 127; }
+          done
 
           work=$(mktemp -d)
           trap '[[ -z ${pid:-} ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
           log="$work/serial.log"; qerr="$work/qemu.stderr"; : > "$log"; : > "$qerr"
 
+          echo "Inspecting ISO live payload before boot..."
+          xorriso -indev "$iso" -ls /live 2>&1 | tee "$work/live-tree.txt"
+          for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
+            xorriso -indev "$iso" -find "$path" -type f -print 2>/dev/null | grep -Fq "$path" || {
+              echo "Required live payload missing from ISO: $path" >&2
+              exit 8
+            }
+          done
+
+          # Test the ISO-hybrid image as a raw boot disk.  This is the path that
+          # most closely models writing the ISO byte-for-byte to a USB stick.
           args=(-machine q35,accel=tcg -m 3072 -smp 2 -cpu max
-                -boot order=d,menu=off -cdrom "$iso"
-                -display none -serial "file:$log" -monitor none -no-reboot -net none)
+                -display none -serial "file:$log" -monitor none -no-reboot -net none
+                -drive "if=none,id=privora_live,format=raw,readonly=on,file=$iso"
+                -device "virtio-blk-pci,drive=privora_live,bootindex=1")
+
           if [[ $mode == uefi ]]; then
             fw=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
             vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
@@ -421,23 +438,29 @@ jobs:
             args+=(-drive "if=pflash,format=raw,readonly=on,file=$fw"
                    -drive "if=pflash,format=raw,file=$work/vars.fd")
           elif [[ $mode != bios ]]; then
-            echo 'mode must be bios or uefi' >&2; exit 2
+            echo 'mode must be bios or uefi' >&2
+            exit 2
           fi
 
-          echo "Starting real $mode ISO boot smoke test..."
-          qemu-system-x86_64 "${args[@]}" >"$work/qemu.stdout" 2>"$qerr" & pid=$!
+          echo "Starting real $mode ISO-hybrid disk boot smoke test..."
+          qemu-system-x86_64 "${args[@]}" >"$work/qemu.stdout" 2>"$qerr" &
+          pid=$!
           deadline=$((SECONDS+timeout_s))
           while (( SECONDS < deadline )); do
             if grep -q 'PRIVORA_LIVE_BOOT_OK' "$log"; then
               grep 'PRIVORA_LIVE_BOOT_OK' "$log" | tail -n1
-              kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; pid=''
-              echo "QEMU $mode real ISO boot: PASS"
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+              pid=''
+              echo "QEMU $mode ISO-hybrid boot: PASS"
               exit 0
             fi
             if ! kill -0 "$pid" 2>/dev/null; then
               echo "QEMU exited before boot marker ($mode)" >&2
-              tail -n 240 "$log" >&2 || true
-              tail -n 120 "$qerr" >&2 || true
+              echo "--- serial tail ---" >&2
+              tail -n 260 "$log" >&2 || true
+              echo "--- qemu stderr tail ---" >&2
+              tail -n 140 "$qerr" >&2 || true
               exit 4
             fi
             sleep 2
@@ -445,31 +468,39 @@ jobs:
 
           echo "Timed out waiting for PRIVORA_LIVE_BOOT_OK ($mode)" >&2
           echo "--- serial tail ---" >&2
-          tail -n 240 "$log" >&2 || true
+          tail -n 260 "$log" >&2 || true
           echo "--- qemu stderr tail ---" >&2
-          tail -n 120 "$qerr" >&2 || true
+          tail -n 140 "$qerr" >&2 || true
           kill "$pid" 2>/dev/null || true
           wait "$pid" 2>/dev/null || true
           pid=''
 
-          # Diagnostic only: this does NOT convert the failed ISO bootloader test
-          # into a pass. It tells us whether kernel/initrd + live userspace work.
+          # Diagnostic only.  Boot the same kernel/initrd directly while keeping
+          # the ISO-hybrid image attached as /dev/vda and tell live-boot exactly
+          # where the medium is.  This distinguishes live-userspace problems
+          # from BIOS/UEFI bootloader problems.
           mkdir -p "$work/direct"
           if xorriso -osirrox on -indev "$iso" -extract /live/vmlinuz "$work/direct/vmlinuz" >/dev/null 2>&1 \
              && xorriso -osirrox on -indev "$iso" -extract /live/initrd.img "$work/direct/initrd.img" >/dev/null 2>&1; then
             dlog="$work/direct-serial.log"; : > "$dlog"
-            echo "Running direct-kernel diagnostic probe..." >&2
+            echo "Running direct-kernel hybrid-media diagnostic probe..." >&2
             dargs=(-machine q35,accel=tcg -m 3072 -smp 2 -cpu max
                    -display none -serial "file:$dlog" -monitor none -no-reboot -net none
-                   -kernel "$work/direct/vmlinuz" -initrd "$work/direct/initrd.img"
-                   -append "boot=live components console=tty0 console=ttyS0,115200 systemd.unit=multi-user.target")
-            qemu-system-x86_64 "${dargs[@]}" >"$work/direct.stdout" 2>"$work/direct.stderr" & pid=$!
-            ddeadline=$((SECONDS+300))
+                   -drive "if=none,id=privora_live,format=raw,readonly=on,file=$iso"
+                   -device "virtio-blk-pci,drive=privora_live"
+                   -kernel "$work/direct/vmlinuz"
+                   -initrd "$work/direct/initrd.img"
+                   -append "boot=live components live-media=/dev/vda live-media-timeout=30 debug=1 console=tty0 console=ttyS0,115200 systemd.unit=multi-user.target")
+            qemu-system-x86_64 "${dargs[@]}" >"$work/direct.stdout" 2>"$work/direct.stderr" &
+            pid=$!
+            ddeadline=$((SECONDS+360))
             while (( SECONDS < ddeadline )); do
               if grep -q 'PRIVORA_LIVE_BOOT_OK' "$dlog"; then
                 grep 'PRIVORA_LIVE_BOOT_OK' "$dlog" | tail -n1 >&2
-                echo "DIAGNOSTIC: live kernel/userspace boots; $mode ISO bootloader path is the failure." >&2
-                kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; pid=''
+                echo "DIAGNOSTIC: live kernel/userspace and hybrid medium are good; $mode bootloader path is the remaining failure." >&2
+                kill "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null || true
+                pid=''
                 exit 5
               fi
               if ! kill -0 "$pid" 2>/dev/null; then break; fi
@@ -478,9 +509,9 @@ jobs:
             kill "$pid" 2>/dev/null || true
             wait "$pid" 2>/dev/null || true
             pid=''
-            echo "DIAGNOSTIC: direct kernel/userspace probe also failed." >&2
-            tail -n 240 "$dlog" >&2 || true
-            tail -n 120 "$work/direct.stderr" >&2 || true
+            echo "DIAGNOSTIC: direct kernel + explicit live-media probe failed." >&2
+            tail -n 300 "$dlog" >&2 || true
+            tail -n 140 "$work/direct.stderr" >&2 || true
           fi
           exit 5
           SMOKE
@@ -613,13 +644,13 @@ jobs:
           live=(unitdir/'privora-live-boot-marker.service').read_text()
           assert 'ConditionKernelCommandLine=boot=live' in live
           isolinux=(root/'distro/config/bootloaders/isolinux/isolinux.cfg').read_text()
-          assert 'prompt 0' in isolinux and 'timeout 50' in isolinux
+          assert 'prompt 0' in isolinux and 'timeout 50' in isolinux and 'ontimeout install' in isolinux
           menu=(root/'distro/config/bootloaders/isolinux/menu.cfg').read_text()
           assert 'label install' in menu and 'menu default' in menu
           cert=(root/'installer/vm/run-install-core-certification.sh').read_text()
           assert 'privora.installer.certify=1' in cert
           assert '-kernel "$work/vmlinuz"' in cert
-          print('PASS: RC2 BIOS auto-boot, certification ordering, and isolated install-certification wiring')
+          print('PASS: RC2 BIOS forced auto-boot, hybrid-media certification, ordering, and isolated install-certification wiring')
           PYCHECK
           CONTAINER
 
@@ -704,6 +735,24 @@ jobs:
           df -h / /work
           CONTAINER
 
+
+
+      - name: Verify ISO live payload and hybrid layout
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          ISO=$(find /work/output -maxdepth 1 -type f -name '*.iso' -print -quit)
+          test -n "$ISO"
+          echo "ISO: $ISO"
+          xorriso -indev "$ISO" -ls /live
+          for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
+            xorriso -indev "$ISO" -find "$path" -type f -print | grep -Fq "$path"
+          done
+          xorriso -indev "$ISO" -report_el_torito plain || true
+          xorriso -indev "$ISO" -report_system_area plain || true
+          CONTAINER
 
       - name: Upload built ISO candidate before VM certification
         uses: actions/upload-artifact@v4
