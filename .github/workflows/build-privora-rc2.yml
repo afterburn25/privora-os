@@ -257,6 +257,54 @@ jobs:
           set -euxo pipefail
           cd /work/src
 
+          # Debian Live ISO BIOS boot uses ISOLINUX.  A menu without an
+          # isolinux.cfg timeout can sit forever in an unattended QEMU run.
+          # Keep "Install Privora" as the normal first/default entry, but make
+          # it auto-start after five seconds so both humans and CI get the same
+          # real ISO boot path.
+          mkdir -p distro/config/bootloaders/isolinux
+          cat > distro/config/bootloaders/isolinux/isolinux.cfg <<'ISOCFG'
+          include menu.cfg
+          default vesamenu.c32
+          prompt 0
+          timeout 50
+          ISOCFG
+
+          python3 - <<'BOOTCFG'
+          from pathlib import Path
+          import re
+
+          menu = Path("distro/config/bootloaders/isolinux/menu.cfg")
+          s = menu.read_text()
+          # Remove the invalid/ambiguous top-level "default install" directive.
+          s = s.replace("default install\n", "")
+          # Mark the Install label as the menu default.
+          marker = "label install\n  menu label Install Privora\n"
+          if marker in s and "label install\n  menu label Install Privora\n  menu default\n" not in s:
+              s = s.replace(marker, marker + "  menu default\n", 1)
+          menu.write_text(s)
+
+          # Keep UEFI GRUB deterministic as well.
+          for rel in (
+              "distro/config/bootloaders/grub-efi/grub.cfg",
+              "distro/config/bootloaders/grub-pc/grub.cfg",
+          ):
+              p = Path(rel)
+              if p.exists():
+                  g = p.read_text()
+                  g = re.sub(r"(?m)^set timeout=.*$", "set timeout=5", g)
+                  if "set timeout_style=menu" not in g:
+                      g = g.replace("set default=0\n", "set default=0\nset timeout_style=menu\n", 1)
+                  p.write_text(g)
+
+          iso = Path("distro/config/bootloaders/isolinux/isolinux.cfg").read_text()
+          assert "prompt 0" in iso
+          assert "timeout 50" in iso
+          m = menu.read_text()
+          assert "label install" in m and "menu default" in m
+          print("PASS: BIOS ISOLINUX unattended auto-boot configured")
+          BOOTCFG
+
           unitdir=distro/config/includes.chroot/usr/lib/systemd/system
           wants=distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants
           mkdir -p "$unitdir" "$wants"
@@ -344,6 +392,100 @@ jobs:
           logger -t privora-live "$msg" || true
           MARKER
           chmod +x distro/config/includes.chroot/usr/lib/privora/live-boot-marker
+
+          # Diagnostic real-media boot smoke test.  It still requires the ISO's
+          # BIOS/UEFI bootloader path to succeed; on failure it also tries the
+          # ISO kernel/initrd directly so the log tells us whether the problem is
+          # the bootloader or the live userspace.
+          cat > ci/qemu-live-smoke.sh <<'SMOKE'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          [[ $# -ge 1 ]] || { echo "Usage: $0 ISO [bios|uefi]" >&2; exit 2; }
+          iso=$(readlink -f "$1"); mode=${2:-bios}; timeout_s=${QEMU_TIMEOUT:-600}
+          [[ -f $iso ]] || { echo "ISO not found: $iso" >&2; exit 2; }
+          command -v qemu-system-x86_64 >/dev/null || { echo 'qemu-system-x86_64 required' >&2; exit 127; }
+          command -v xorriso >/dev/null || { echo 'xorriso required' >&2; exit 127; }
+
+          work=$(mktemp -d)
+          trap '[[ -z ${pid:-} ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
+          log="$work/serial.log"; qerr="$work/qemu.stderr"; : > "$log"; : > "$qerr"
+
+          args=(-machine q35,accel=tcg -m 3072 -smp 2 -cpu max
+                -boot order=d,menu=off -cdrom "$iso"
+                -display none -serial "file:$log" -monitor none -no-reboot -net none)
+          if [[ $mode == uefi ]]; then
+            fw=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+            vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
+            [[ -r $fw && -r $vars ]] || { echo 'OVMF firmware missing' >&2; exit 127; }
+            cp "$vars" "$work/vars.fd"
+            args+=(-drive "if=pflash,format=raw,readonly=on,file=$fw"
+                   -drive "if=pflash,format=raw,file=$work/vars.fd")
+          elif [[ $mode != bios ]]; then
+            echo 'mode must be bios or uefi' >&2; exit 2
+          fi
+
+          echo "Starting real $mode ISO boot smoke test..."
+          qemu-system-x86_64 "${args[@]}" >"$work/qemu.stdout" 2>"$qerr" & pid=$!
+          deadline=$((SECONDS+timeout_s))
+          while (( SECONDS < deadline )); do
+            if grep -q 'PRIVORA_LIVE_BOOT_OK' "$log"; then
+              grep 'PRIVORA_LIVE_BOOT_OK' "$log" | tail -n1
+              kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; pid=''
+              echo "QEMU $mode real ISO boot: PASS"
+              exit 0
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo "QEMU exited before boot marker ($mode)" >&2
+              tail -n 240 "$log" >&2 || true
+              tail -n 120 "$qerr" >&2 || true
+              exit 4
+            fi
+            sleep 2
+          done
+
+          echo "Timed out waiting for PRIVORA_LIVE_BOOT_OK ($mode)" >&2
+          echo "--- serial tail ---" >&2
+          tail -n 240 "$log" >&2 || true
+          echo "--- qemu stderr tail ---" >&2
+          tail -n 120 "$qerr" >&2 || true
+          kill "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+          pid=''
+
+          # Diagnostic only: this does NOT convert the failed ISO bootloader test
+          # into a pass. It tells us whether kernel/initrd + live userspace work.
+          mkdir -p "$work/direct"
+          if xorriso -osirrox on -indev "$iso" -extract /live/vmlinuz "$work/direct/vmlinuz" >/dev/null 2>&1 \
+             && xorriso -osirrox on -indev "$iso" -extract /live/initrd.img "$work/direct/initrd.img" >/dev/null 2>&1; then
+            dlog="$work/direct-serial.log"; : > "$dlog"
+            echo "Running direct-kernel diagnostic probe..." >&2
+            dargs=(-machine q35,accel=tcg -m 3072 -smp 2 -cpu max
+                   -display none -serial "file:$dlog" -monitor none -no-reboot -net none
+                   -kernel "$work/direct/vmlinuz" -initrd "$work/direct/initrd.img"
+                   -append "boot=live components console=tty0 console=ttyS0,115200 systemd.unit=multi-user.target")
+            qemu-system-x86_64 "${dargs[@]}" >"$work/direct.stdout" 2>"$work/direct.stderr" & pid=$!
+            ddeadline=$((SECONDS+300))
+            while (( SECONDS < ddeadline )); do
+              if grep -q 'PRIVORA_LIVE_BOOT_OK' "$dlog"; then
+                grep 'PRIVORA_LIVE_BOOT_OK' "$dlog" | tail -n1 >&2
+                echo "DIAGNOSTIC: live kernel/userspace boots; $mode ISO bootloader path is the failure." >&2
+                kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; pid=''
+                exit 5
+              fi
+              if ! kill -0 "$pid" 2>/dev/null; then break; fi
+              sleep 2
+            done
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            pid=''
+            echo "DIAGNOSTIC: direct kernel/userspace probe also failed." >&2
+            tail -n 240 "$dlog" >&2 || true
+            tail -n 120 "$work/direct.stderr" >&2 || true
+          fi
+          exit 5
+          SMOKE
+          chmod +x ci/qemu-live-smoke.sh
+          bash -n ci/qemu-live-smoke.sh
 
           # The destructive disposable-install certification must never be enabled
           # in the normal user-facing boot menu. Boot the ISO's own kernel/initrd
@@ -470,10 +612,14 @@ jobs:
               assert (wants/name).is_symlink(), name
           live=(unitdir/'privora-live-boot-marker.service').read_text()
           assert 'ConditionKernelCommandLine=boot=live' in live
+          isolinux=(root/'distro/config/bootloaders/isolinux/isolinux.cfg').read_text()
+          assert 'prompt 0' in isolinux and 'timeout 50' in isolinux
+          menu=(root/'distro/config/bootloaders/isolinux/menu.cfg').read_text()
+          assert 'label install' in menu and 'menu default' in menu
           cert=(root/'installer/vm/run-install-core-certification.sh').read_text()
           assert 'privora.installer.certify=1' in cert
           assert '-kernel "$work/vmlinuz"' in cert
-          print('PASS: RC2 boot certification ordering and isolated install-certification wiring')
+          print('PASS: RC2 BIOS auto-boot, certification ordering, and isolated install-certification wiring')
           PYCHECK
           CONTAINER
 
