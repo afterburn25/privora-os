@@ -105,7 +105,7 @@ jobs:
           chmod -R u+rwX /work/privora
           find /work/privora -type f -name '*.sh' -exec chmod +x {} +
 
-      - name: Apply RC2 multiarch and disk-budget fixes
+      - name: Apply RC2 build compatibility fixes
         working-directory: /work/privora
         run: |
           set -eux
@@ -163,6 +163,17 @@ jobs:
           s = s.replace(old_copy, new_copy, 1)
           repo.write_text(s)
 
+          # privora-platform is the canonical owner of backend helper commands.
+          # Older RC2 source accidentally packaged these same two files again in
+          # privora-system-apps, which makes dpkg abort with a file-overwrite error.
+          deb_builder = Path('tools/build-first-party-debs.py')
+          bs = deb_builder.read_text()
+          old_backend = "    'privora-oem','privora-cloud','privora-connect','privora-ai','privora-apply-branding'\n"
+          new_backend = "    'privora-oem','privora-cloud','privora-connect','privora-ai','privora-apply-branding',\n    'privora-hardware-compat','privora-update-rollback-plan'\n"
+          if old_backend not in bs:
+              raise SystemExit('privora-system-apps backend ownership anchor not found')
+          deb_builder.write_text(bs.replace(old_backend, new_backend, 1))
+
           engine = Path('installer/live/privora-install-engine')
           s = engine.read_text()
           needle = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
@@ -200,6 +211,44 @@ jobs:
       - name: Validate source
         working-directory: /work/privora
         run: ./ci/validate.sh
+
+      - name: Verify first-party package file ownership
+        working-directory: /work/privora
+        run: |
+          set -eux
+          ./tools/build-first-party-debs.py
+          python3 - <<'PYOWN'
+          from pathlib import Path
+          import itertools, subprocess
+
+          packages = {}
+          for deb in sorted(Path('release/debs').glob('*.deb')):
+              out = subprocess.check_output(['dpkg-deb','-c',str(deb)], text=True)
+              files = set()
+              for line in out.splitlines():
+                  parts = line.split()
+                  if not parts or parts[0].startswith('d'):
+                      continue
+                  path = parts[-1]
+                  if path.startswith('./'):
+                      path = '/' + path[2:]
+                  files.add(path)
+              packages[deb.name] = files
+
+          collisions = []
+          for a, b in itertools.combinations(sorted(packages), 2):
+              for path in sorted(packages[a] & packages[b]):
+                  collisions.append((a,b,path))
+          if collisions:
+              print('ERROR: first-party .deb file ownership collisions detected:')
+              for a,b,path in collisions:
+                  print(f'  {path}: {a} <-> {b}')
+              raise SystemExit(1)
+          print(f'PASS: no file ownership collisions across {len(packages)} Privora .deb packages')
+          PYOWN
+          dpkg-deb -c release/debs/privora-system-apps_*.deb | grep -F '/usr/bin/privora-hardware-compat' && exit 1 || true
+          dpkg-deb -c release/debs/privora-system-apps_*.deb | grep -F '/usr/bin/privora-update-rollback-plan' && exit 1 || true
+          df -h /
 
       - name: Disk-space preflight
         run: |
