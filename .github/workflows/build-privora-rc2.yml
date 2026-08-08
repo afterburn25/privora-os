@@ -55,7 +55,7 @@ jobs:
             git ca-certificates unzip live-build debootstrap squashfs-tools xorriso \
             syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
             dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
-            qemu-system-x86 qemu-utils ovmf dpkg-dev python3 gzip coreutils
+            dpkg-dev python3 gzip coreutils
 
       - name: Check out repository
         uses: actions/checkout@v4
@@ -105,7 +105,7 @@ jobs:
           chmod -R u+rwX /work/privora
           find /work/privora -type f -name '*.sh' -exec chmod +x {} +
 
-      - name: Apply RC2 amd64 multiarch offline-repository fix
+      - name: Apply RC2 multiarch and disk-budget fixes
         working-directory: /work/privora
         run: |
           set -eux
@@ -122,17 +122,57 @@ jobs:
                   '  -o APT::Install-Recommends=true\n')
           if needle not in s:
               raise SystemExit('offline repository APT options anchor not found')
-          repo.write_text(s.replace(needle, repl, 1))
+          s = s.replace(needle, repl, 1)
+
+          old_profiles = (
+              '# Build the union of every selectable desktop and application edition. Base/Live\n'
+              '# packages do not need to be repeated; selected profile dependencies do.\n'
+              'mapfile -t packages < <(\n'
+              '  cat "$root"/distro/profiles/desktops/*.list.chroot "$root"/distro/profiles/editions/*.list.chroot |\n'
+              "    sed 's/#.*$//' | awk 'NF{print $1}' | sort -u\n"
+              ')\n'
+          )
+          new_profiles = (
+              '# Build a media-sized offline pool by default.\n'
+              'scope=${OFFLINE_REPO_SCOPE:-selected}\n'
+              'desktop=${DESKTOP:-plasma}\n'
+              'edition=${EDITION:-standard}\n'
+              'case "$scope" in\n'
+              '  selected)\n'
+              '    desktop_file="$root/distro/profiles/desktops/$desktop.list.chroot"\n'
+              '    edition_file="$root/distro/profiles/editions/$edition.list.chroot"\n'
+              '    [[ -f $desktop_file && -f $edition_file ]] || { echo "Unknown selected offline profile" >&2; exit 2; }\n'
+              '    mapfile -t packages < <(cat "$desktop_file" "$edition_file" | sed \'s/#.*$//\' | awk \'NF{print $1}\' | sort -u)\n'
+              '    ;;\n'
+              '  all)\n'
+              '    mapfile -t packages < <(cat "$root"/distro/profiles/desktops/*.list.chroot "$root"/distro/profiles/editions/*.list.chroot | sed \'s/#.*$//\' | awk \'NF{print $1}\' | sort -u)\n'
+              '    ;;\n'
+              '  *) echo "Unsupported OFFLINE_REPO_SCOPE: $scope" >&2; exit 2 ;;\n'
+              'esac\n'
+              'printf \'Offline repository scope: %s (desktop=%s edition=%s)\\n\' "$scope" "$desktop" "$edition"\n'
+          )
+          if old_profiles not in s:
+              raise SystemExit('offline repository profile-union anchor not found')
+          s = s.replace(old_profiles, new_profiles, 1)
+
+          old_copy = 'find "$work/archives" -maxdepth 1 -type f -name \'*.deb\' -exec cp -n {} "$out/pool/" \\;\n'
+          new_copy = ('find "$work/archives" -maxdepth 1 -type f -name \'*.deb\' -exec mv -n {} "$out/pool/" \\;\n'
+                      'rm -rf "$work"\n')
+          if old_copy not in s:
+              raise SystemExit('offline repository duplicate-copy anchor not found')
+          s = s.replace(old_copy, new_copy, 1)
+          repo.write_text(s)
 
           engine = Path('installer/live/privora-install-engine')
           s = engine.read_text()
           needle = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
-          repl = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    # Steam on Debian amd64 requires the i386 foreign architecture. Enable it only\n    # when the Gaming profile is selected; the offline media contains both arches.\n    if edition=='gaming':\n        cmd(['dpkg','--add-architecture','i386'],chroot=True)\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
+          repl = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    # Steam on Debian amd64 requires the i386 foreign architecture. Enable it only\n    # when the Gaming profile is selected.\n    if edition=='gaming':\n        cmd(['dpkg','--add-architecture','i386'],chroot=True)\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
           if needle not in s:
               raise SystemExit('installer profile-install anchor not found')
           engine.write_text(s.replace(needle, repl, 1))
           PYFIX
           chmod +x tools/build-offline-installer-repo.sh installer/live/privora-install-engine
+          bash -n tools/build-offline-installer-repo.sh
 
       - name: Verify Steam multiarch dependency closure with offline-repo resolver settings
         working-directory: /work/privora
@@ -153,29 +193,66 @@ jobs:
             -y --download-only install \
             steam-installer steam-libs-i386:i386 steam-libs:i386
           test -n "$(find /tmp/privora-apt-check/archives -maxdepth 1 -type f -name 'steam-libs-i386_*_i386.deb' -print -quit)"
+          rm -rf /tmp/privora-apt-check
+          apt-get clean
+          df -h /
 
       - name: Validate source
         working-directory: /work/privora
         run: ./ci/validate.sh
+
+      - name: Disk-space preflight
+        run: |
+          set -eux
+          echo 'Disk availability before live-build:'
+          df -h /
+          du -sh /work/privora 2>/dev/null || true
+          apt-get clean
+          rm -rf /var/cache/apt/archives/*
+          df -h /
 
       - name: Build installer-first ISO
         working-directory: /work/privora
         run: |
           INSTALLER=1 \
           OFFLINE_REPO=1 \
+          OFFLINE_REPO_SCOPE=selected \
           PERSISTENCE=1 \
           DESKTOP=plasma \
           EDITION=standard \
           ARCHITECTURE=amd64 \
           ./ci/build-live-iso.sh
 
-      - name: Find and validate ISO
+      - name: Find, validate, and preserve ISO; reclaim build space
         working-directory: /work/privora
         run: |
+          set -eux
           iso=$(find distro -maxdepth 1 -type f -name 'Privora-4.0-rc2-Installer-*.iso' -print -quit)
           test -n "$iso"
           ./tools/iso-preflight.py "$iso"
-          echo "ISO=$iso" >> "$GITHUB_ENV"
+          mkdir -p /work/privora-output
+          preserved="/work/privora-output/$(basename "$iso")"
+          cp "$iso" "$preserved"
+          echo "ISO=$preserved" >> "$GITHUB_ENV"
+          echo 'Disk use before live-build cleanup:'
+          df -h /
+          du -sh distro/chroot distro/config/includes.binary/privora-repo release/.offline-repo-work 2>/dev/null || true
+          (cd distro && lb clean --purge) || true
+          rm -rf distro/chroot distro/binary distro/cache distro/.build distro/config/includes.binary/privora-repo release/.offline-repo-work
+          apt-get clean
+          rm -rf /var/cache/apt/archives/* /tmp/* || true
+          echo 'Disk use after live-build cleanup:'
+          df -h /
+
+      - name: Install QEMU test tools after ISO build
+        run: |
+          set -eux
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            qemu-system-x86 qemu-utils ovmf
+          apt-get clean
+          rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+          df -h /
 
       - name: BIOS boot smoke test
         working-directory: /work/privora
@@ -193,7 +270,7 @@ jobs:
         run: |
           set -eux
           mkdir -p "$GITHUB_WORKSPACE/output"
-          cp "/work/privora/$ISO" "$GITHUB_WORKSPACE/output/"
+          cp "$ISO" "$GITHUB_WORKSPACE/output/"
           cd "$GITHUB_WORKSPACE/output"
           sha256sum *.iso > SHA256SUMS.txt
           cat > FLASH-TO-USB-WINDOWS.txt <<'TXT'
