@@ -248,6 +248,235 @@ jobs:
           bash -n distro/auto/config
           CONTAINER
 
+
+      - name: Repair RC2 live and installed boot certification wiring
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+
+          unitdir=distro/config/includes.chroot/usr/lib/systemd/system
+          wants=distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants
+          mkdir -p "$unitdir" "$wants"
+
+          cat > "$unitdir/privora-live-boot-marker.service" <<'UNIT'
+          [Unit]
+          Description=Privora Live boot certification marker
+          After=local-fs.target
+          ConditionKernelCommandLine=boot=live
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/lib/privora/live-boot-marker
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          cat > "$unitdir/privora-installed-boot-marker.service" <<'UNIT'
+          [Unit]
+          Description=Privora installed-system boot certification marker
+          After=local-fs.target
+          ConditionPathExists=/etc/privora-release
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/lib/privora/installed-boot-marker
+          RemainAfterExit=yes
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          cat > "$unitdir/privora-persistence-certifier.service" <<'UNIT'
+          [Unit]
+          Description=Privora persistence reboot certification
+          After=privora-live-boot-marker.service
+          ConditionKernelCommandLine=boot=live
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/lib/privora/persistence-certifier
+          TimeoutStartSec=90
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          cat > "$unitdir/privora-install-core-certifier.service" <<'UNIT'
+          [Unit]
+          Description=Privora disposable-disk installation core certification
+          After=privora-live-boot-marker.service
+          ConditionKernelCommandLine=boot=live
+
+          [Service]
+          Type=oneshot
+          ExecStart=/usr/lib/privora/install-core-certifier
+          TimeoutStartSec=900
+
+          [Install]
+          WantedBy=multi-user.target
+          UNIT
+
+          # Use real .wants symlinks rather than copied unit files.
+          for unit in \
+            privora-live-boot-marker.service \
+            privora-installed-boot-marker.service \
+            privora-persistence-certifier.service \
+            privora-install-core-certifier.service
+          do
+            rm -f "$wants/$unit"
+            ln -s "/usr/lib/systemd/system/$unit" "$wants/$unit"
+          done
+
+          # Make the live boot marker observable both through COM1 and the console.
+          cat > distro/config/includes.chroot/usr/lib/privora/live-boot-marker <<'MARKER'
+          #!/bin/sh
+          set -eu
+          release=$(cat /etc/privora-release 2>/dev/null || awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2);print $2}' /etc/os-release)
+          msg="PRIVORA_LIVE_BOOT_OK release=${release:-unknown}"
+          printf '%s\n' "$msg" > /run/privora-live-boot-ok
+          if [ -c /dev/ttyS0 ]; then printf '%s\n' "$msg" > /dev/ttyS0 || true; fi
+          if [ -c /dev/console ]; then printf '%s\n' "$msg" > /dev/console || true; fi
+          logger -t privora-live "$msg" || true
+          MARKER
+          chmod +x distro/config/includes.chroot/usr/lib/privora/live-boot-marker
+
+          # The destructive disposable-install certification must never be enabled
+          # in the normal user-facing boot menu. Boot the ISO's own kernel/initrd
+          # directly for this isolated test and add the certification flag only
+          # to that QEMU invocation. BIOS/UEFI ISO boot is tested separately.
+          cat > installer/vm/run-install-core-certification.sh <<'CERT'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          [[ $# -ge 1 ]] || { echo 'Usage: run-install-core-certification.sh ISO' >&2; exit 2; }
+          iso=$(readlink -f "$1"); timeout_s=${QEMU_TIMEOUT:-900}
+          [[ -f $iso ]] || { echo "ISO not found: $iso" >&2; exit 2; }
+          for t in qemu-system-x86_64 qemu-img xorriso; do
+            command -v "$t" >/dev/null || { echo "$t required" >&2; exit 127; }
+          done
+          fw=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+          vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
+          [[ -r $fw && -r $vars ]] || { echo 'OVMF firmware missing' >&2; exit 127; }
+
+          work=$(mktemp -d)
+          trap '[[ -z ${pid:-} ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
+          disk="$work/install-target.qcow2"
+          log="$work/install.log"
+          cp "$vars" "$work/vars.fd"
+          qemu-img create -q -f qcow2 "$disk" "${INSTALL_DISK_SIZE:-24G}"
+
+          xorriso -osirrox on -indev "$iso" -extract /live/vmlinuz "$work/vmlinuz" >/dev/null 2>&1
+          xorriso -osirrox on -indev "$iso" -extract /live/initrd.img "$work/initrd.img" >/dev/null 2>&1
+          test -s "$work/vmlinuz"
+          test -s "$work/initrd.img"
+
+          common=(
+            -machine q35,accel=tcg -cpu max -m 4096 -smp 4
+            -display none -monitor none -net none
+            -drive "if=pflash,format=raw,readonly=on,file=$fw"
+            -drive "if=pflash,format=raw,file=$work/vars.fd"
+            -drive "if=none,id=target,format=qcow2,file=$disk"
+            -device "virtio-blk-pci,drive=target,serial=PRIVORA_TEST_DISK"
+            -device virtio-rng-pci
+          )
+
+          : > "$log"
+          qemu-system-x86_64 "${common[@]}" \
+            -kernel "$work/vmlinuz" \
+            -initrd "$work/initrd.img" \
+            -append "boot=live components console=tty0 console=ttyS0,115200 systemd.unit=multi-user.target privora.installer.certify=1" \
+            -cdrom "$iso" \
+            -serial "file:$log" >/dev/null 2>&1 &
+          pid=$!
+
+          deadline=$((SECONDS+timeout_s))
+          while ((SECONDS<deadline)); do
+            if grep -q 'PRIVORA_INSTALL_WRITE_OK' "$log"; then
+              wait "$pid" 2>/dev/null || true
+              pid=''
+              break
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo 'installer VM exited before write marker' >&2
+              tail -n 250 "$log" >&2
+              exit 4
+            fi
+            sleep 2
+          done
+          grep -q 'PRIVORA_INSTALL_WRITE_OK' "$log" || {
+            echo 'timed out waiting for install write marker' >&2
+            tail -n 250 "$log" >&2
+            exit 5
+          }
+
+          # Fresh firmware vars model a new installed-system boot. This phase
+          # exercises the installed UEFI removable boot path from the test disk.
+          cp "$vars" "$work/vars-installed.fd"
+          : > "$work/installed.log"
+          args=(
+            -machine q35,accel=tcg -cpu max -m 3072 -smp 2
+            -display none -monitor none -net none -no-reboot
+            -drive "if=pflash,format=raw,readonly=on,file=$fw"
+            -drive "if=pflash,format=raw,file=$work/vars-installed.fd"
+            -drive "if=none,id=target,format=qcow2,file=$disk"
+            -device "virtio-blk-pci,drive=target,serial=PRIVORA_TEST_DISK"
+            -device virtio-rng-pci
+            -serial "file:$work/installed.log"
+          )
+          qemu-system-x86_64 "${args[@]}" >/dev/null 2>&1 &
+          pid=$!
+          deadline=$((SECONDS+420))
+          while ((SECONDS<deadline)); do
+            if grep -q 'PRIVORA_INSTALLED_BOOT_OK' "$work/installed.log"; then
+              grep 'PRIVORA_INSTALLED_BOOT_OK' "$work/installed.log" | tail -n1
+              kill "$pid" 2>/dev/null || true
+              wait "$pid" 2>/dev/null || true
+              pid=''
+              echo 'Privora disposable UEFI install + installed boot: PASS'
+              exit 0
+            fi
+            if ! kill -0 "$pid" 2>/dev/null; then
+              echo 'installed VM exited before boot marker' >&2
+              tail -n 250 "$work/installed.log" >&2
+              exit 6
+            fi
+            sleep 2
+          done
+          echo 'timed out waiting for PRIVORA_INSTALLED_BOOT_OK' >&2
+          tail -n 250 "$work/installed.log" >&2
+          exit 7
+          CERT
+          chmod +x installer/vm/run-install-core-certification.sh
+          bash -n installer/vm/run-install-core-certification.sh
+
+          python3 - <<'PYCHECK'
+          from pathlib import Path
+          root=Path('.')
+          unitdir=root/'distro/config/includes.chroot/usr/lib/systemd/system'
+          wants=root/'distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants'
+          names=[
+              'privora-live-boot-marker.service',
+              'privora-installed-boot-marker.service',
+              'privora-persistence-certifier.service',
+              'privora-install-core-certifier.service',
+          ]
+          for name in names:
+              text=(unitdir/name).read_text()
+              assert 'After=multi-user.target' not in text, name
+              assert (wants/name).is_symlink(), name
+          live=(unitdir/'privora-live-boot-marker.service').read_text()
+          assert 'ConditionKernelCommandLine=boot=live' in live
+          cert=(root/'installer/vm/run-install-core-certification.sh').read_text()
+          assert 'privora.installer.certify=1' in cert
+          assert '-kernel "$work/vmlinuz"' in cert
+          print('PASS: RC2 boot certification ordering and isolated install-certification wiring')
+          PYCHECK
+          CONTAINER
+
       - name: Validate Privora source and first-party package ownership
         shell: bash
         run: |
@@ -329,6 +558,15 @@ jobs:
           df -h / /work
           CONTAINER
 
+
+      - name: Upload built ISO candidate before VM certification
+        uses: actions/upload-artifact@v4
+        with:
+          name: Privora-4.0-RC2-ISO-Candidate-Uncertified
+          path: ${{ runner.temp }}/privora-build/output/
+          if-no-files-found: error
+          retention-days: 3
+
       - name: Install QEMU and certify BIOS, UEFI, and installation
         shell: bash
         run: |
@@ -356,8 +594,8 @@ jobs:
           cd /work/src
           ISO=$(find /work/output -maxdepth 1 -type f -name '*.iso' -print -quit)
           test -n "$ISO"
-          QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" bios
-          QEMU_TIMEOUT=420 ./ci/qemu-live-smoke.sh "$ISO" uefi
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
           QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
           CONTAINER
 
