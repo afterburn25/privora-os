@@ -60,14 +60,48 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v4
 
-      - name: Unpack Privora RC2 source
+      - name: Locate and unpack Privora RC2 source
         run: |
           set -eux
-          test -f Privora-4.0-RC2-Web-Source.zip
+          echo "Repository files after checkout:"
+          find . -maxdepth 4 -type f -printf '%p\n' | sort | sed -n '1,250p'
+
+          SOURCE_ZIP=""
+          if [ -f ./Privora-4.0-RC2-Web-Source.zip ]; then
+            SOURCE_ZIP=./Privora-4.0-RC2-Web-Source.zip
+          else
+            SOURCE_ZIP="$(find . -type f \
+              \( -iname 'Privora-4.0-RC2-Web-Source*.zip' -o -iname '*Privora*RC2*Source*.zip' \) \
+              -printf '%s %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+          fi
+
+          if [ -z "$SOURCE_ZIP" ] || [ ! -f "$SOURCE_ZIP" ]; then
+            echo 'ERROR: No Privora RC2 source ZIP was found anywhere in the repository.' >&2
+            echo 'Upload the source ZIP to the repository, commit it, then rerun this workflow.' >&2
+            exit 1
+          fi
+
+          echo "Using Privora source archive: $SOURCE_ZIP"
+          unzip -t "$SOURCE_ZIP" >/dev/null
           rm -rf /work/privora
           mkdir -p /work/privora
-          unzip -q Privora-4.0-RC2-Web-Source.zip -d /work/privora
-          test "$(cat /work/privora/VERSION)" = "4.0-rc2"
+          unzip -q "$SOURCE_ZIP" -d /work/privora
+
+          # Accept either a flat source ZIP or one containing a single top-level folder.
+          if [ ! -f /work/privora/VERSION ]; then
+            VERSION_FILE="$(find /work/privora -mindepth 2 -maxdepth 3 -type f -name VERSION -print -quit)"
+            if [ -n "$VERSION_FILE" ]; then
+              SOURCE_ROOT="$(dirname "$VERSION_FILE")"
+              rm -rf /work/privora-flat
+              mkdir -p /work/privora-flat
+              cp -a "$SOURCE_ROOT"/. /work/privora-flat/
+              rm -rf /work/privora
+              mv /work/privora-flat /work/privora
+            fi
+          fi
+
+          test -f /work/privora/VERSION
+          test "$(tr -d '\r\n' < /work/privora/VERSION)" = "4.0-rc2"
           chmod -R u+rwX /work/privora
           find /work/privora -type f -name '*.sh' -exec chmod +x {} +
 
