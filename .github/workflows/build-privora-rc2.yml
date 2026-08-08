@@ -20,24 +20,33 @@ jobs:
           URIs: http://deb.debian.org/debian
           Suites: trixie trixie-updates
           Components: main contrib non-free non-free-firmware
+          Architectures: amd64 i386
           Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
           Types: deb
           URIs: http://deb.debian.org/debian-security
           Suites: trixie-security
           Components: main contrib non-free non-free-firmware
+          Architectures: amd64 i386
           Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
           SOURCES
           dpkg --add-architecture i386
           apt-get update
 
-      - name: Verify gaming package candidates
+      - name: Verify amd64 and i386 gaming package candidates
         run: |
           set -eux
-          apt-cache policy lutris steam-installer winetricks
+          dpkg --print-architecture
+          dpkg --print-foreign-architectures
+          apt-config dump | grep -E '^APT::Architectures|^APT::Architecture' || true
+          apt-cache policy \
+            lutris steam-installer winetricks \
+            steam-libs-i386:i386 steam-libs:i386 libc6:i386 libgl1:i386
           test -n "$(apt-cache madison lutris | head -n1)"
           test -n "$(apt-cache madison steam-installer | head -n1)"
           test -n "$(apt-cache madison winetricks | head -n1)"
+          test -n "$(apt-cache madison steam-libs-i386:i386 | head -n1)"
+          test -n "$(apt-cache madison steam-libs:i386 | head -n1)"
 
       - name: Install Debian 13 build tools
         run: |
@@ -61,6 +70,55 @@ jobs:
           test "$(cat /work/privora/VERSION)" = "4.0-rc2"
           chmod -R u+rwX /work/privora
           find /work/privora -type f -name '*.sh' -exec chmod +x {} +
+
+      - name: Apply RC2 amd64 multiarch offline-repository fix
+        working-directory: /work/privora
+        run: |
+          set -eux
+          python3 - <<'PYFIX'
+          from pathlib import Path
+
+          repo = Path('tools/build-offline-installer-repo.sh')
+          s = repo.read_text()
+          needle = '  -o APT::Get::Download-Only=true\n  -o APT::Install-Recommends=true\n'
+          repl = ('  -o APT::Architecture=amd64\n'
+                  '  -o APT::Architectures::=amd64\n'
+                  '  -o APT::Architectures::=i386\n'
+                  '  -o APT::Get::Download-Only=true\n'
+                  '  -o APT::Install-Recommends=true\n')
+          if needle not in s:
+              raise SystemExit('offline repository APT options anchor not found')
+          repo.write_text(s.replace(needle, repl, 1))
+
+          engine = Path('installer/live/privora-install-engine')
+          s = engine.read_text()
+          needle = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
+          repl = "    desktop=plan.get('desktop') or 'plasma'; edition=plan.get('edition') or 'standard'\n    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n    # Steam on Debian amd64 requires the i386 foreign architecture. Enable it only\n    # when the Gaming profile is selected; the offline media contains both arches.\n    if edition=='gaming':\n        cmd(['dpkg','--add-architecture','i386'],chroot=True)\n    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n"
+          if needle not in s:
+              raise SystemExit('installer profile-install anchor not found')
+          engine.write_text(s.replace(needle, repl, 1))
+          PYFIX
+          chmod +x tools/build-offline-installer-repo.sh installer/live/privora-install-engine
+
+      - name: Verify Steam multiarch dependency closure with offline-repo resolver settings
+        working-directory: /work/privora
+        run: |
+          set -eux
+          rm -rf /tmp/privora-apt-check
+          mkdir -p /tmp/privora-apt-check/archives/partial
+          : > /tmp/privora-apt-check/status
+          apt-get \
+            -o Debug::NoLocking=1 \
+            -o Dir::State::status=/tmp/privora-apt-check/status \
+            -o Dir::Cache::archives=/tmp/privora-apt-check/archives \
+            -o APT::Architecture=amd64 \
+            -o APT::Architectures::=amd64 \
+            -o APT::Architectures::=i386 \
+            -o APT::Get::Download-Only=true \
+            -o APT::Install-Recommends=true \
+            -y --download-only install \
+            steam-installer steam-libs-i386:i386 steam-libs:i386
+          test -n "$(find /tmp/privora-apt-check/archives -maxdepth 1 -type f -name 'steam-libs-i386_*_i386.deb' -print -quit)"
 
       - name: Validate source
         working-directory: /work/privora
