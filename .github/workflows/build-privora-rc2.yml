@@ -12,9 +12,36 @@ jobs:
     timeout-minutes: 240
 
     steps:
+      - name: Configure Debian 13 repositories and i386 multiarch
+        run: |
+          set -eux
+          cat > /etc/apt/sources.list.d/debian.sources <<'SOURCES'
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: trixie trixie-updates
+          Components: main contrib non-free non-free-firmware
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://deb.debian.org/debian-security
+          Suites: trixie-security
+          Components: main contrib non-free non-free-firmware
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          SOURCES
+          dpkg --add-architecture i386
+          apt-get update
+
+      - name: Verify gaming package candidates
+        run: |
+          set -eux
+          apt-cache policy lutris steam-installer winetricks
+          test -n "$(apt-cache madison lutris | head -n1)"
+          test -n "$(apt-cache madison steam-installer | head -n1)"
+          test -n "$(apt-cache madison winetricks | head -n1)"
+
       - name: Install Debian 13 build tools
         run: |
-          apt-get update
+          set -eux
           DEBIAN_FRONTEND=noninteractive apt-get install -y \
             git ca-certificates unzip live-build debootstrap squashfs-tools xorriso \
             syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
@@ -26,6 +53,7 @@ jobs:
 
       - name: Unpack Privora RC2 source
         run: |
+          set -eux
           test -f Privora-4.0-RC2-Web-Source.zip
           rm -rf /work/privora
           mkdir -p /work/privora
@@ -71,11 +99,12 @@ jobs:
 
       - name: Prepare downloadable ISO artifact
         run: |
+          set -eux
           mkdir -p "$GITHUB_WORKSPACE/output"
           cp "/work/privora/$ISO" "$GITHUB_WORKSPACE/output/"
           cd "$GITHUB_WORKSPACE/output"
           sha256sum *.iso > SHA256SUMS.txt
-          cat > FLASH-TO-USB-WINDOWS.txt <<'EOF'
+          cat > FLASH-TO-USB-WINDOWS.txt <<'TXT'
           PRIVORA 4.0 RC2 - WINDOWS USB FLASHING
 
           1. Back up anything on the target USB; it will be erased.
@@ -88,7 +117,7 @@ jobs:
 
           Back up your computer before installing. If Windows uses BitLocker,
           keep your recovery key available before changing disk partitions.
-          EOF
+          TXT
 
       - name: Upload Privora RC2 ISO
         uses: actions/upload-artifact@v4
