@@ -415,9 +415,10 @@ jobs:
           log="$work/serial.log"; qerr="$work/qemu.stderr"; : > "$log"; : > "$qerr"
 
           echo "Inspecting ISO live payload before boot..."
+          echo "Using xorriso native -find (default echo action; no GNU find -print option)."
           xorriso -indev "$iso" -ls /live 2>&1 | tee "$work/live-tree.txt"
           for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
-            xorriso -indev "$iso" -find "$path" -type f -print 2>/dev/null | grep -Fq "$path" || {
+            xorriso -indev "$iso" -find "$path" -type f -- 2>/dev/null | grep -Fq "$path" || {
               echo "Required live payload missing from ISO: $path" >&2
               exit 8
             }
@@ -748,7 +749,7 @@ jobs:
           echo "ISO: $ISO"
           xorriso -indev "$ISO" -ls /live
           for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
-            xorriso -indev "$ISO" -find "$path" -type f -print | grep -Fq "$path"
+            xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
           done
           xorriso -indev "$ISO" -report_el_torito plain || true
           xorriso -indev "$ISO" -report_system_area plain || true
