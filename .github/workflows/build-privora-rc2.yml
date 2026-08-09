@@ -1,4 +1,4 @@
-name: Privora 4.0 RC3 — Salvage Last Real Source Baselines v27
+name: Build Privora 4.0 RC3 — Reconstructed v28 — Full Certification
 
 on:
   workflow_dispatch:
@@ -7,200 +7,266 @@ permissions:
   contents: read
 
 jobs:
-  salvage:
+  installer-amd64:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
-
-    env:
-      LAST_LIVE_UX_COMMIT: 3a98a81a2212eafe840f6c5ebeff4a3cf446687b
+    timeout-minutes: 180
 
     steps:
-      - name: Check out complete repository history
+      - name: Check out repository
         uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-          fetch-tags: true
 
-      - name: Install salvage tools
+      - name: Reclaim runner disk space
         shell: bash
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            unzip zip xz-utils file
-          sudo apt-get clean
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af --volumes || true
+          sudo apt-get clean || true
+          df -h /
 
-      - name: Verify known last live UX commit
+      - name: Select exact reconstructed RC3 v28 source
         shell: bash
         run: |
           set -euxo pipefail
+          EXPECTED_SHA256='bd2859cd0b5544d027d16e8a7d208f446af2152ffa575f88ad5981a363e55d8f'
+          EXPECTED_NAME='Privora-4.0-RC3-Reconstructed-v28-Web-Source.zip'
 
-          git cat-file -e "$LAST_LIVE_UX_COMMIT^{commit}"
-
-          echo 'Selected salvage commit:'
-          git show -s \
-            --date=iso \
-            --format='commit=%H%nparent=%P%nauthor_date=%ad%nsubject=%s' \
-            "$LAST_LIVE_UX_COMMIT"
-
-          SUBJECT=$(git show -s --format='%s' "$LAST_LIVE_UX_COMMIT")
-          if [ "$SUBJECT" != 'Implement Privora live UX recovery steps' ]; then
-            echo "ERROR: expected the known live UX recovery commit, got: $SUBJECT" >&2
-            exit 27
+          SOURCE_ZIP=$(find . -maxdepth 3 -type f -name "$EXPECTED_NAME" -print -quit)
+          if [ -z "$SOURCE_ZIP" ]; then
+            echo "ERROR: $EXPECTED_NAME is not present in the repository." >&2
+            echo 'Upload the reconstructed v28 source ZIP beside this workflow; do not substitute RC2 or the lost v21 hash.' >&2
+            find . -maxdepth 3 -type f -printf '%p\n' | sort | head -n 400 >&2
+            exit 28
           fi
 
-      - name: Export last real repository source snapshot
+          actual=$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')
+          echo "source=$SOURCE_ZIP"
+          echo "sha256=$actual"
+          if [ "$actual" != "$EXPECTED_SHA256" ]; then
+            echo "ERROR: reconstructed source checksum mismatch." >&2
+            echo "Expected: $EXPECTED_SHA256" >&2
+            echo "Actual:   $actual" >&2
+            exit 29
+          fi
+
+          unzip -t "$SOURCE_ZIP" >/dev/null
+          BUILDROOT="$RUNNER_TEMP/privora-build"
+          rm -rf "$BUILDROOT"
+          mkdir -p "$BUILDROOT/src" "$BUILDROOT/output"
+          unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
+
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc3'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.1.0'
+          test -f "$BUILDROOT/src/RECONSTRUCTION-PROVENANCE.md"
+          test -f "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          grep -Fq 'reconstructed source baseline v28' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          test -f "$BUILDROOT/src/tests/systemd-context-safety-test.py"
+          test -f "$BUILDROOT/src/tests/bios-graphical-boot-safety-test.py"
+          test -f "$BUILDROOT/src/tests/rc3-consumer-experience-test.py"
+          test -x "$BUILDROOT/src/ci/validate-rc3-reconstructed.sh"
+
+          chmod -R u+rwX "$BUILDROOT/src"
+          find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
+          echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
+          echo 'PASS: exact reconstructed RC3 v28 source selected'
+
+      - name: Start Debian 13 build container
         shell: bash
         run: |
           set -euxo pipefail
+          docker pull debian:13
+          docker run -d --name privora-builder --privileged             -v "$BUILDROOT:/work"             debian:13 sleep infinity
+          docker exec privora-builder bash -lc 'cat /etc/debian_version; df -h / /work'
 
-          SALVAGE="$RUNNER_TEMP/privora-v27-salvage"
-          rm -rf "$SALVAGE"
-          mkdir -p \
-            "$SALVAGE/output" \
-            "$SALVAGE/work/commit-tree" \
-            "$SALVAGE/work/rc2-zips"
-
-          echo "SALVAGE=$SALVAGE" >> "$GITHUB_ENV"
-
-          # Export the exact committed tree without .git metadata.
-          git archive "$LAST_LIVE_UX_COMMIT" \
-            | tar -x -C "$SALVAGE/work/commit-tree"
-
-          echo '--- last live UX commit tree ---' \
-            | tee "$SALVAGE/output/COMMIT-TREE-INVENTORY.txt"
-          find "$SALVAGE/work/commit-tree" -type f \
-            -printf '%s\t%p\n' \
-            | sed "s#${SALVAGE}/work/commit-tree/##" \
-            | sort \
-            | tee -a "$SALVAGE/output/COMMIT-TREE-INVENTORY.txt"
-
-          echo '--- likely build/source control files ---' \
-            | tee "$SALVAGE/output/KEY-FILES.txt"
-          find "$SALVAGE/work/commit-tree" -type f \
-            \( -name 'VERSION' \
-               -o -name 'build.sh' \
-               -o -name '*.yml' \
-               -o -name '*.yaml' \
-               -o -name '*.py' \
-               -o -name '*.sh' \
-               -o -name 'Makefile' \
-               -o -name 'README.md' \) \
-            -printf '%p\n' \
-            | sed "s#${SALVAGE}/work/commit-tree/##" \
-            | sort \
-            | tee -a "$SALVAGE/output/KEY-FILES.txt"
-
-          # Package this exact committed source snapshot.
-          (
-            cd "$SALVAGE/work/commit-tree"
-            zip -qr "$SALVAGE/output/Privora-Last-Live-UX-Commit-3a98a81-Source.zip" .
-          )
-
-          test -s "$SALVAGE/output/Privora-Last-Live-UX-Commit-3a98a81-Source.zip"
-          unzip -t "$SALVAGE/output/Privora-Last-Live-UX-Commit-3a98a81-Source.zip" >/dev/null
-
-      - name: Recover deleted RC2 source ZIP blobs from Git history
+      - name: Configure Debian 13 build environment
         shell: bash
         run: |
           set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cat > /etc/apt/sources.list.d/debian.sources <<'SOURCES'
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: trixie trixie-updates
+          Components: main contrib non-free non-free-firmware
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
 
-          LIST="$SALVAGE/output/HISTORICAL-RC2-ZIP-OBJECTS.txt"
-          : > "$LIST"
+          Types: deb
+          URIs: http://deb.debian.org/debian-security
+          Suites: trixie-security
+          Components: main contrib non-free non-free-firmware
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          SOURCES
 
-          git rev-list --objects --all \
-            | grep -Ei ' [^ ]*Privora-4\.0-RC2[^ ]*(Web-Source|Source)[^ ]*\.zip$' \
-            | sort -u \
-            | tee "$LIST" || true
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends             ca-certificates git unzip xz-utils live-build debootstrap squashfs-tools xorriso             syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed             dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools             dpkg-dev python3 python3-pil gzip coreutils gcc binutils file
+          for tool in gcc ld readelf nm file dpkg-deb dpkg-scanpackages xorriso lb python3; do
+            command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 127; }
+          done
+          CONTAINER
 
-          index=0
-          recovered=0
-
-          while read -r object_id historical_path; do
-            [ -n "${object_id:-}" ] || continue
-            [ -n "${historical_path:-}" ] || continue
-
-            [ "$(git cat-file -t "$object_id" 2>/dev/null || true)" = 'blob' ] || continue
-
-            index=$((index + 1))
-            candidate="$SALVAGE/work/rc2-zips/rc2-source-${index}.zip"
-            git cat-file blob "$object_id" > "$candidate"
-
-            if head -c 100 "$candidate" \
-              | grep -Fq 'version https://git-lfs.github.com/spec/v1'; then
-              echo "SKIP Git LFS pointer: $object_id $historical_path" \
-                | tee -a "$SALVAGE/output/RC2-RECOVERY-RESULTS.txt"
-              rm -f "$candidate"
-              continue
-            fi
-
-            if ! unzip -t "$candidate" >/dev/null 2>&1; then
-              echo "SKIP non-ZIP blob: $object_id $historical_path" \
-                | tee -a "$SALVAGE/output/RC2-RECOVERY-RESULTS.txt"
-              rm -f "$candidate"
-              continue
-            fi
-
-            sha=$(sha256sum "$candidate" | awk '{print $1}')
-            bytes=$(stat -c '%s' "$candidate")
-            recovered=$((recovered + 1))
-
-            final="$SALVAGE/output/Recovered-RC2-Source-${recovered}-${object_id:0:12}.zip"
-            mv "$candidate" "$final"
-
-            echo "RECOVERED object=$object_id sha256=$sha bytes=$bytes historical_path=$historical_path output=$(basename "$final")" \
-              | tee -a "$SALVAGE/output/RC2-RECOVERY-RESULTS.txt"
-
-            unzip -Z1 "$final" \
-              | head -n 400 \
-              > "$SALVAGE/output/Recovered-RC2-Source-${recovered}-${object_id:0:12}-CONTENTS.txt"
-          done < "$LIST"
-
-          echo "Recovered valid RC2 source ZIP blobs: $recovered" \
-            | tee "$SALVAGE/output/RC2-RECOVERY-COUNT.txt"
-
-      - name: Produce reconstruction evidence manifest
+      - name: Validate reconstructed permanent source
         shell: bash
         run: |
           set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+          ./ci/validate-rc3-reconstructed.sh
+          rm -rf release/.deb-work release/debs prism/.build prism/dist
+          find . -type d -name __pycache__ -prune -exec rm -rf {} +
+          CONTAINER
 
-          {
-            echo 'Privora RC3 source salvage v27'
-            echo
-            echo "Last known live UX commit:"
-            git show -s \
-              --date=iso \
-              --format='  commit: %H%n  date: %ad%n  subject: %s' \
-              "$LAST_LIVE_UX_COMMIT"
-            echo
-            echo 'Purpose:'
-            echo '  Preserve the last concrete committed Privora source baseline and any'
-            echo '  deleted RC2 source ZIP blobs before reconstructing the lost RC3 tree.'
-            echo
-            echo 'Important:'
-            echo '  None of these outputs are the lost canonical RC3 v21 source ZIP.'
-            echo '  They are reconstruction inputs and must not be labeled as byte-identical RC3.'
-          } | tee "$SALVAGE/output/RECONSTRUCTION-EVIDENCE.txt"
+      - name: Build reconstructed Privora Prism installer ISO
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src/distro
+          DESKTOP=privora EDITION=standard INSTALLER=1 OFFLINE_REPO=1 PERSISTENCE=auto ./build.sh
+          ISO=$(find . -maxdepth 1 -type f -name 'Privora-4.0-rc3-Installer-privora-standard-amd64.iso' -print -quit)
+          test -n "$ISO"
+          test -s "$ISO"
+          mv "$ISO" /work/output/
+          if [ -f "$ISO.sha256" ]; then mv "$ISO.sha256" /work/output/; fi
+          cd /work/output
+          sha256sum Privora-4.0-rc3-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
+          cp /work/src/RECONSTRUCTION-PROVENANCE.md .
+          cp /work/src/release/RC3-RECONSTRUCTED-v28-VALIDATION.txt .
+          cd /work/src/distro
+          lb clean --purge || true
+          rm -rf chroot binary cache .build || true
+          CONTAINER
 
-          (
-            cd "$SALVAGE/output"
-            sha256sum \
-              Privora-Last-Live-UX-Commit-3a98a81-Source.zip \
-              Recovered-RC2-Source-*.zip \
-              2>/dev/null || \
-            sha256sum Privora-Last-Live-UX-Commit-3a98a81-Source.zip
-          ) | tee "$SALVAGE/output/SHA256SUMS.txt"
+      - name: Verify finished ISO boot and provenance payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
+          test -s "$ISO"
+          for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
+            xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
+          done
 
-          echo 'Output inventory:'
-          find "$SALVAGE/output" -maxdepth 1 -type f \
-            -printf '%s\t%f\n' \
-            | sort
+          bootcheck=$(mktemp -d)
+          xorriso -osirrox on -indev "$ISO" -extract /isolinux/isolinux.cfg "$bootcheck/isolinux.cfg" >/dev/null 2>&1
+          cat "$bootcheck/isolinux.cfg"
+          ! grep -Eqi '^[[:space:]]*ONTIMEOUT([[:space:]]|$)' "$bootcheck/isolinux.cfg"
+          grep -Fq 'UI vesamenu.c32' "$bootcheck/isolinux.cfg"
+          grep -Fq 'DEFAULT live' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU DEFAULT' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU BACKGROUND privora-boot-center.jpg' "$bootcheck/isolinux.cfg"
+          grep -Fq 'TIMEOUT 200' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU MARGIN 8' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU WIDTH 64' "$bootcheck/isolinux.cfg"
+          ! grep -Fq 'MENU RESOLUTION' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LABEL installcompat' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.mode=install nomodeset privora.installer.compat=1' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LABEL console' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.mode=console systemd.unit=multi-user.target' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.recovery=1' "$bootcheck/isolinux.cfg"
+          ! grep -Fq 'privora.recovery=1 systemd.unit=multi-user.target' "$bootcheck/isolinux.cfg"
 
-      - name: Upload reconstruction inputs
+          for path in /isolinux/isolinux.bin /isolinux/vesamenu.c32 /isolinux/ldlinux.c32 /isolinux/libcom32.c32 /isolinux/libutil.c32 /isolinux/reboot.c32 /isolinux/poweroff.c32; do
+            xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
+          done
+          xorriso -osirrox on -indev "$ISO" -extract /isolinux/privora-boot-center.jpg "$bootcheck/boot.jpg" >/dev/null 2>&1
+          file "$bootcheck/boot.jpg" | tee "$bootcheck/file.txt"
+          grep -Fq 'JPEG image data' "$bootcheck/file.txt"
+          grep -Fq '640x480' "$bootcheck/file.txt"
+
+          # Prove the reconstruction marker is inside the live filesystem source
+          # tree used by live-build. The generated SquashFS itself is additionally
+          # exercised by QEMU below.
+          grep -Fq 'reconstructed source baseline v28' /work/src/distro/config/includes.chroot/etc/privora/reconstruction
+          xorriso -indev "$ISO" -report_el_torito plain || true
+          xorriso -indev "$ISO" -report_system_area plain || true
+          rm -rf "$bootcheck"
+          CONTAINER
+
+      - name: Upload ISO candidate before VM certification
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC3-v27-Reconstruction-Inputs
-          path: ${{ runner.temp }}/privora-v27-salvage/output/
+          name: Privora-4.0-RC3-Reconstructed-v28-ISO-Candidate-Uncertified
+          path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 14
           compression-level: 0
+
+      - name: Install QEMU certification tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf
+          apt-get clean
+          rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+          CONTAINER
+
+      - name: Certify BIOS, UEFI, and disposable installation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
+
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
+          QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
+
+          cat > /work/output/CERTIFICATION.txt <<'EOF'
+          Privora 4.0 RC3 — Reconstructed v28
+          Privora Prism Environment 1.1
+
+          Reconstructed source identity: VERIFIED
+          BIOS ISO-hybrid live boot: PASS
+          UEFI ISO-hybrid live boot: PASS
+          Disposable UEFI install/write: PASS
+          Installed-system boot marker: PASS
+
+          This certifies the reconstructed v28 baseline, not the lost byte-identical v21 source archive.
+          EOF
+          CONTAINER
+
+      - name: Add Windows USB instructions
+        if: success()
+        shell: bash
+        run: |
+          cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'EOF'
+          Privora 4.0 RC3 — Reconstructed v28 — Privora Prism 1.1
+
+          1. Verify the ISO against SHA256SUMS.txt.
+          2. Open Rufus on Windows.
+          3. Select Privora-4.0-rc3-Installer-privora-standard-amd64.iso.
+          4. For a modern PC, use GPT / UEFI.
+          5. Write the image to the USB drive; the selected USB is erased.
+          6. Boot from the UEFI USB entry.
+          7. Choose Try Privora Live or Install Privora.
+          8. Live login fallback: user `privora`, password `live`.
+          9. The source provenance marker is retained under /etc/privora/reconstruction.
+          EOF
+
+      - name: Upload certified reconstructed RC3 ISO
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: Privora-4.0-RC3-Reconstructed-v28-Certified-Installer-Prism-1.1-amd64
+          path: ${{ runner.temp }}/privora-build/output/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Stop build container
+        if: always()
+        shell: bash
+        run: docker rm -f privora-builder >/dev/null 2>&1 || true
