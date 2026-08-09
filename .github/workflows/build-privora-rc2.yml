@@ -1,4 +1,4 @@
-name: Build Privora 4.0 RC2 Installer ISO
+name: Build Privora 4.0 RC2 Installer ISO — v15 BIOS Menu Fix
 
 on:
   workflow_dispatch:
@@ -851,39 +851,43 @@ jobs:
           chmod +x distro/config/hooks/live/0097-disable-legacy-privora-splash.hook.chroot
 
           # 3) Present the choice before mounting/starting the graphical desktop.
-          # BIOS and UEFI both show the same Install / Try Live decision.
+          # Keep BIOS ISOLINUX self-contained: do not use ONTIMEOUT with a label
+          # name. The Syslinux menu will boot MENU DEFAULT after TIMEOUT.
           mkdir -p distro/config/bootloaders/isolinux
           cat > distro/config/bootloaders/isolinux/isolinux.cfg <<'ISOCFG'
-          include menu.cfg
-          default vesamenu.c32
-          prompt 0
-          timeout 200
-          ontimeout live
-          serial 0 115200
+          UI vesamenu.c32
+          PROMPT 0
+          TIMEOUT 200
+          SERIAL 0 115200
+
+          MENU TITLE Privora 4.0
+          MENU MARGIN 8
+          MENU ROWS 8
+          MENU TABMSG Select an option and press Enter
+
+          LABEL install
+            MENU LABEL ^Install Privora
+            LINUX /live/vmlinuz
+            INITRD /live/initrd.img
+            APPEND boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=install
+
+          LABEL live
+            MENU LABEL ^Try Privora Live
+            MENU DEFAULT
+            LINUX /live/vmlinuz
+            INITRD /live/initrd.img
+            APPEND boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=live
+
+          LABEL safe
+            MENU LABEL Privora ^Safe Graphics
+            LINUX /live/vmlinuz
+            INITRD /live/initrd.img
+            APPEND boot=live components quiet splash nomodeset privora.mode=live
           ISOCFG
 
-          cat > distro/config/bootloaders/isolinux/menu.cfg <<'ISOMENU'
-          menu title Privora 4.0
-          menu margin 8
-          menu rows 8
-          menu tabmsg Press Enter to continue
-
-          label install
-            menu label ^Install Privora
-            kernel /live/vmlinuz
-            append initrd=/live/initrd.img boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=install
-
-          label live
-            menu label ^Try Privora Live
-            menu default
-            kernel /live/vmlinuz
-            append initrd=/live/initrd.img boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=live
-
-          label safe
-            menu label Privora ^Safe Graphics
-            kernel /live/vmlinuz
-            append initrd=/live/initrd.img boot=live components quiet splash nomodeset privora.mode=live
-          ISOMENU
+          # Remove stale nested menu files from the custom template. The BIOS
+          # chooser above is intentionally the complete top-level menu.
+          rm -f distro/config/bootloaders/isolinux/menu.cfg
 
           for grubdir in grub-efi grub-pc; do
               mkdir -p "distro/config/bootloaders/$grubdir"
@@ -1034,7 +1038,12 @@ jobs:
           # Static regression checks for the exact Live UX requirements.
           grep -q 'LIVE_USERNAME="privora"' "$rootfs/etc/live/config.conf.d/privora.conf"
           grep -q 'LIVE_USER_FULLNAME="Privora User"' "$rootfs/etc/live/config.conf.d/privora.conf"
-          grep -q 'ontimeout live' distro/config/bootloaders/isolinux/isolinux.cfg
+          ! grep -Eqi '^[[:space:]]*ONTIMEOUT([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
+          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+install([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
+          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+live([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
+          grep -Eqi '^[[:space:]]*MENU[[:space:]]+DEFAULT([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
+          grep -Fq 'LINUX /live/vmlinuz' distro/config/bootloaders/isolinux/isolinux.cfg
+          grep -Fq 'INITRD /live/initrd.img' distro/config/bootloaders/isolinux/isolinux.cfg
           grep -q "menuentry 'Install Privora'" distro/config/bootloaders/grub-efi/grub.cfg
           grep -q "menuentry 'Try Privora Live'" distro/config/bootloaders/grub-efi/grub.cfg
           grep -q 'Plymouth.SetBootProgressFunction' "$theme/privora.script"
@@ -1104,6 +1113,22 @@ jobs:
           for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
             xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
           done
+
+          # Verify the exact BIOS config that ended up in the ISO, not merely
+          # the pre-build template.
+          bootcheck=$(mktemp -d)
+          trap 'rm -rf "$bootcheck"' EXIT
+          xorriso -osirrox on -indev "$ISO" -extract /isolinux/isolinux.cfg "$bootcheck/isolinux.cfg" >/dev/null 2>&1
+          echo '--- /isolinux/isolinux.cfg from finished ISO ---'
+          cat "$bootcheck/isolinux.cfg"
+          ! grep -Eqi '^[[:space:]]*ONTIMEOUT([[:space:]]|$)' "$bootcheck/isolinux.cfg"
+          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+install([[:space:]]|$)' "$bootcheck/isolinux.cfg"
+          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+live([[:space:]]|$)' "$bootcheck/isolinux.cfg"
+          grep -Eqi '^[[:space:]]*MENU[[:space:]]+DEFAULT([[:space:]]|$)' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LINUX /live/vmlinuz' "$bootcheck/isolinux.cfg"
+          grep -Fq 'INITRD /live/initrd.img' "$bootcheck/isolinux.cfg"
+          echo 'PASS: finished ISO contains direct Privora BIOS chooser with valid Live kernel/initrd paths'
+
           xorriso -indev "$ISO" -report_el_torito plain || true
           xorriso -indev "$ISO" -report_system_area plain || true
           CONTAINER
