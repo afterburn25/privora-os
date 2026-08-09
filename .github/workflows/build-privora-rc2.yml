@@ -1,4 +1,4 @@
-name: Build Privora 4.0 RC2 — Privora Prism 1.0
+name: Build Privora 4.0 RC3 — Consumer Experience & Next-Gen Prism
 
 on:
   workflow_dispatch:
@@ -32,13 +32,13 @@ jobs:
         run: |
           set -euxo pipefail
           SOURCE_ZIP=''
-          if [ -f Privora-4.0-RC2-Web-Source.zip ]; then
-            SOURCE_ZIP="$PWD/Privora-4.0-RC2-Web-Source.zip"
+          if [ -f Privora-4.0-RC3-Web-Source.zip ]; then
+            SOURCE_ZIP="$PWD/Privora-4.0-RC3-Web-Source.zip"
           else
-            SOURCE_ZIP=$(find . -maxdepth 3 -type f \( -iname 'Privora-4.0-RC2-Web-Source.zip' -o -iname '*Privora*RC2*Source*.zip' \) -printf '%s %p\n' | sort -nr | head -n1 | cut -d' ' -f2- || true)
+            SOURCE_ZIP=$(find . -maxdepth 3 -type f \( -iname 'Privora-4.0-RC3-Web-Source.zip' -o -iname '*Privora*RC3*Source*.zip' \) -printf '%s %p\n' | sort -nr | head -n1 | cut -d' ' -f2- || true)
           fi
           if [ -z "$SOURCE_ZIP" ] || [ ! -f "$SOURCE_ZIP" ]; then
-            echo 'ERROR: No Privora RC2 source ZIP was found.' >&2
+            echo 'ERROR: No Privora RC3 source ZIP was found.' >&2
             find . -maxdepth 3 -type f -printf '%p\n' | sort >&2
             exit 1
           fi
@@ -57,8 +57,8 @@ jobs:
             rm -rf "$BUILDROOT/src"
             mv "$BUILDROOT/flat" "$BUILDROOT/src"
           fi
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc2'
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.0.0'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc3'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.1.0'
           chmod -R u+rwX "$BUILDROOT/src"
           find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
           echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
@@ -118,6 +118,7 @@ jobs:
           ./tools/render-boot-menus.py
           ./prism/tools/audit.sh
           python3 tests/prism-environment-test.py
+          python3 tests/rc3-consumer-experience-test.py
           python3 tests/source-of-truth-regression-test.py
           python3 tests/live-build-static-test.py
           python3 tests/grub-live-package-test.py
@@ -139,13 +140,13 @@ jobs:
           set -euxo pipefail
           cd /work/src/distro
           DESKTOP=privora EDITION=standard INSTALLER=1 OFFLINE_REPO=1 PERSISTENCE=auto ./build.sh
-          ISO=$(find . -maxdepth 1 -type f -name 'Privora-4.0-rc2-Installer-privora-standard-amd64.iso' -print -quit)
+          ISO=$(find . -maxdepth 1 -type f -name 'Privora-4.0-rc3-Installer-privora-standard-amd64.iso' -print -quit)
           test -n "$ISO"
           test -s "$ISO"
           mv "$ISO" /work/output/
           if [ -f "$ISO.sha256" ]; then mv "$ISO.sha256" /work/output/; fi
           cd /work/output
-          sha256sum Privora-4.0-rc2-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
+          sha256sum Privora-4.0-rc3-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
           cd /work/src/distro
           lb clean --purge || true
           rm -rf chroot binary cache .build || true
@@ -158,7 +159,7 @@ jobs:
           set -euxo pipefail
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
-          ISO=/work/output/Privora-4.0-rc2-Installer-privora-standard-amd64.iso
+          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
           test -s "$ISO"
           xorriso -indev "$ISO" -ls /live
           for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
@@ -171,6 +172,13 @@ jobs:
           grep -Fq 'MENU DEFAULT' "$bootcheck/isolinux.cfg"
           grep -Fq 'LINUX /live/vmlinuz' "$bootcheck/isolinux.cfg"
           grep -Fq 'INITRD /live/initrd.img' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU BACKGROUND privora-boot-center.jpg' "$bootcheck/isolinux.cfg"
+          grep -Fq 'Privora Terminal / Console Mode' "$bootcheck/isolinux.cfg"
+          grep -Fq 'Install Privora (Compatibility Mode)' "$bootcheck/isolinux.cfg"
+          grep -Fq 'Privora Recovery & Repair' "$bootcheck/isolinux.cfg"
+          xorriso -indev "$ISO" -find / -type f -- > "$bootcheck/files.txt" 2>/dev/null
+          grep -Fq 'privora-boot-center.jpg' "$bootcheck/files.txt"
+          grep -Fq 'privora-theme.txt' "$bootcheck/files.txt"
           xorriso -indev "$ISO" -report_el_torito plain || true
           xorriso -indev "$ISO" -report_system_area plain || true
           rm -rf "$bootcheck"
@@ -179,7 +187,7 @@ jobs:
       - name: Upload ISO candidate before VM certification
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC2-Prism-1.0-ISO-Candidate-Uncertified
+          name: Privora-4.0-RC3-Consumer-Experience-ISO-Candidate-Uncertified
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 3
@@ -204,12 +212,12 @@ jobs:
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
           cd /work/src
-          ISO=/work/output/Privora-4.0-rc2-Installer-privora-standard-amd64.iso
+          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
           QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
           QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
           QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
           cat > /work/output/CERTIFICATION.txt <<'EOF'
-          Privora 4.0 RC2 / Privora Prism Environment 1.0
+          Privora 4.0 RC3 / Consumer Experience / Privora Prism Environment 1.1
           BIOS ISO-hybrid live boot: PASS
           UEFI ISO-hybrid live boot: PASS
           Disposable UEFI install/write: PASS
@@ -221,22 +229,22 @@ jobs:
         shell: bash
         run: |
           cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'EOF'
-          Privora 4.0 RC2 — Privora Prism Environment 1.0
+          Privora 4.0 RC3 — Consumer Experience & Next-Gen Prism — Prism Environment 1.1
 
           1. Verify the ISO against SHA256SUMS.txt.
           2. Open Rufus on Windows.
-          3. Select Privora-4.0-rc2-Installer-privora-standard-amd64.iso.
+          3. Select Privora-4.0-rc3-Installer-privora-standard-amd64.iso.
           4. For a modern PC, use GPT / UEFI.
           5. Write the image to the USB drive; the selected USB is erased.
           6. Boot the PC from the UEFI USB entry.
           7. Choose Try Privora Live or Install Privora.
-          8. The default graphical session is Privora Prism Environment 1.0.
+          8. The default graphical session is Privora Prism Environment 1.1.
           EOF
 
       - name: Upload certified Privora Prism ISO
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC2-Installer-Privora-Prism-1.0-Standard-amd64
+          name: Privora-4.0-RC3-Installer-Privora-Prism-1.1-Standard-amd64
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 14
