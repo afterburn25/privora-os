@@ -1,4 +1,4 @@
-name: Build Privora 4.0 RC3 — Consumer Experience & Next-Gen Prism
+name: Build Privora 4.0 RC3 — Consumer Experience & Next-Gen Prism — systemd context hotfix v18
 
 on:
   workflow_dispatch:
@@ -119,6 +119,7 @@ jobs:
           ./prism/tools/audit.sh
           python3 tests/prism-environment-test.py
           python3 tests/rc3-consumer-experience-test.py
+          python3 tests/systemd-context-safety-test.py
           python3 tests/source-of-truth-regression-test.py
           python3 tests/live-build-static-test.py
           python3 tests/grub-live-package-test.py
@@ -173,9 +174,15 @@ jobs:
           grep -Fq 'LINUX /live/vmlinuz' "$bootcheck/isolinux.cfg"
           grep -Fq 'INITRD /live/initrd.img' "$bootcheck/isolinux.cfg"
           grep -Fq 'MENU BACKGROUND privora-boot-center.jpg' "$bootcheck/isolinux.cfg"
-          grep -Fq 'Privora Terminal / Console Mode' "$bootcheck/isolinux.cfg"
-          grep -Fq 'Install Privora (Compatibility Mode)' "$bootcheck/isolinux.cfg"
-          grep -Fq 'Privora Recovery & Repair' "$bootcheck/isolinux.cfg"
+          # Verify boot functions by stable LABEL/APPEND contracts rather than the
+          # rendered MENU LABEL text. Syslinux uses ^ to mark hotkeys, so exact
+          # human-readable label checks can fail even when the menu entry is valid.
+          grep -Fq 'LABEL console' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.mode=console systemd.unit=multi-user.target' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LABEL installcompat' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.mode=install nomodeset privora.installer.compat=1' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LABEL recovery' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.recovery=1' "$bootcheck/isolinux.cfg"
           xorriso -indev "$ISO" -find / -type f -- > "$bootcheck/files.txt" 2>/dev/null
           grep -Fq 'privora-boot-center.jpg' "$bootcheck/files.txt"
           grep -Fq 'privora-theme.txt' "$bootcheck/files.txt"
