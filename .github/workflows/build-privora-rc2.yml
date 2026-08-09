@@ -1,4 +1,4 @@
-name: Build Privora 4.0 RC3 — Consumer Experience & Next-Gen Prism — systemd context hotfix v18
+name: Build Privora 4.0 RC3 — Consumer Experience & Next-Gen Prism — source contract hotfix v20
 
 on:
   workflow_dispatch:
@@ -27,22 +27,56 @@ jobs:
           echo 'Disk after cleanup:'
           df -h /
 
-      - name: Locate and unpack permanent Privora source
+      - name: Locate and verify RC3 v18+ permanent source
         shell: bash
         run: |
           set -euxo pipefail
+          EXPECTED_SHA256='0c20c1e4dbe8739414af867e677360475ffe2ea0d1f657fb7f75c92256a447ea'
           SOURCE_ZIP=''
-          if [ -f Privora-4.0-RC3-Web-Source.zip ]; then
-            SOURCE_ZIP="$PWD/Privora-4.0-RC3-Web-Source.zip"
-          else
-            SOURCE_ZIP=$(find . -maxdepth 3 -type f \( -iname 'Privora-4.0-RC3-Web-Source.zip' -o -iname '*Privora*RC3*Source*.zip' \) -printf '%s %p\n' | sort -nr | head -n1 | cut -d' ' -f2- || true)
-          fi
-          if [ -z "$SOURCE_ZIP" ] || [ ! -f "$SOURCE_ZIP" ]; then
+          mapfile -t CANDIDATES < <(find . -maxdepth 3 -type f \
+            \( -iname 'Privora-4.0-RC3-Web-Source*.zip' -o -iname '*Privora*RC3*Source*.zip' \) \
+            -print | sort)
+          if [ "${#CANDIDATES[@]}" -eq 0 ]; then
             echo 'ERROR: No Privora RC3 source ZIP was found.' >&2
-            find . -maxdepth 3 -type f -printf '%p\n' | sort >&2
             exit 1
           fi
+
+          echo 'RC3 source candidates:'
+          for candidate in "${CANDIDATES[@]}"; do
+            sha256sum "$candidate"
+          done
+
+          # Prefer the exact v18 source package.  This prevents an older top-level
+          # Privora-4.0-RC3-Web-Source.zip from silently winning over a newer upload.
+          for candidate in "${CANDIDATES[@]}"; do
+            actual=$(sha256sum "$candidate" | awk '{print $1}')
+            if [ "$actual" = "$EXPECTED_SHA256" ]; then
+              SOURCE_ZIP="$candidate"
+              break
+            fi
+          done
+
+          # If the archive was intentionally repacked, accept it only when it
+          # carries the v18 source-contract marker and the required regression test.
+          if [ -z "$SOURCE_ZIP" ]; then
+            for candidate in "${CANDIDATES[@]}"; do
+              if unzip -Z1 "$candidate" | grep -Eq '(^|/)tests/systemd-context-safety-test\.py$' \
+                 && unzip -Z1 "$candidate" | grep -Eq '(^|/)release/RC3-SYSTEMD-CONTEXT-HOTFIX-v18\.md$'; then
+                SOURCE_ZIP="$candidate"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "$SOURCE_ZIP" ]; then
+            echo 'ERROR: RC3 source is stale. None of the uploaded source ZIPs contains the v18 systemd-context fix.' >&2
+            echo 'Replace the repository source ZIP with the v18/v20 Privora-4.0-RC3-Web-Source.zip.' >&2
+            exit 2
+          fi
+
+          SOURCE_ZIP=$(realpath "$SOURCE_ZIP")
           echo "Using source archive: $SOURCE_ZIP"
+          sha256sum "$SOURCE_ZIP"
           unzip -t "$SOURCE_ZIP" >/dev/null
           BUILDROOT="$RUNNER_TEMP/privora-build"
           rm -rf "$BUILDROOT"
@@ -57,11 +91,15 @@ jobs:
             rm -rf "$BUILDROOT/src"
             mv "$BUILDROOT/flat" "$BUILDROOT/src"
           fi
+
           test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc3'
           test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.1.0'
+          test -f "$BUILDROOT/src/tests/systemd-context-safety-test.py"
+          test -f "$BUILDROOT/src/release/RC3-SYSTEMD-CONTEXT-HOTFIX-v18.md"
           chmod -R u+rwX "$BUILDROOT/src"
           find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
           echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
+          echo 'PASS: selected RC3 source contains v18 systemd-context regression contract'
           df -h /
 
       - name: Start Debian 13 build container
