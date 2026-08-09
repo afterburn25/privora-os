@@ -693,6 +693,354 @@ jobs:
           df -h / /work
           CONTAINER
 
+
+      - name: Apply Privora live UX recovery
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+
+          # 1) Brand the Debian Live account at creation time.
+          mkdir -p distro/config/includes.chroot/etc/live/config.conf.d
+          cat > distro/config/includes.chroot/etc/live/config.conf.d/privora.conf <<'LIVECFG'
+          LIVE_HOSTNAME="privora"
+          LIVE_USERNAME="privora"
+          LIVE_USER_FULLNAME="Privora User"
+          LIVECFG
+
+          # Ensure SDDM enters the Live desktop automatically after live-config
+          # creates the Privora account.
+          mkdir -p distro/config/includes.chroot/usr/lib/live/config
+          cat > distro/config/includes.chroot/usr/lib/live/config/9999-privora-sddm <<'SDDMHOOK'
+          #!/bin/sh
+          set -eu
+          [ -d /etc/sddm.conf.d ] || mkdir -p /etc/sddm.conf.d
+          cat > /etc/sddm.conf.d/99-privora-live.conf <<'EOF'
+          [Autologin]
+          User=privora
+          Relogin=false
+          EOF
+          exit 0
+          SDDMHOOK
+          chmod +x distro/config/includes.chroot/usr/lib/live/config/9999-privora-sddm
+
+          # 2) Replace the desktop/window splash with a real Plymouth boot splash.
+          # The theme is part of the initramfs, so it runs while the Live root is
+          # being discovered/mounted instead of opening as a closable GUI window.
+          mkdir -p distro/config/package-lists
+          cat > distro/config/package-lists/privora-live-ux.list.chroot <<'PKGS'
+          live-config
+          plymouth
+          plymouth-themes
+          PKGS
+
+          theme=distro/config/includes.chroot/usr/share/plymouth/themes/privora
+          mkdir -p "$theme"
+          cat > "$theme/privora.plymouth" <<'PLYTHEME'
+          [Plymouth Theme]
+          Name=Privora
+          Description=Privora graphical boot progress
+          ModuleName=script
+
+          [script]
+          ImageDir=/usr/share/plymouth/themes/privora
+          ScriptFile=/usr/share/plymouth/themes/privora/privora.script
+          PLYTHEME
+
+          cat > "$theme/privora.script" <<'PLYSCRIPT'
+          Window.SetBackgroundTopColor(0.010, 0.016, 0.035);
+          Window.SetBackgroundBottomColor(0.025, 0.030, 0.070);
+
+          logo.image = Image("logo.png");
+          logo.sprite = Sprite(logo.image);
+          logo.scale = 1;
+          if (logo.image.GetWidth() > Window.GetWidth() * 0.48)
+          {
+              logo.scale = (Window.GetWidth() * 0.48) / logo.image.GetWidth();
+          }
+          if (logo.image.GetHeight() * logo.scale > Window.GetHeight() * 0.26)
+          {
+              logo.scale = (Window.GetHeight() * 0.26) / logo.image.GetHeight();
+          }
+          logo.scaled = logo.image.Scale(logo.image.GetWidth() * logo.scale,
+                                         logo.image.GetHeight() * logo.scale);
+          logo.sprite.SetImage(logo.scaled);
+          logo.sprite.SetX((Window.GetWidth() - logo.scaled.GetWidth()) / 2);
+          logo.sprite.SetY((Window.GetHeight() - logo.scaled.GetHeight()) / 2 - 70);
+
+          track.image = Image("track.png");
+          track.sprite = Sprite(track.image);
+          track.sprite.SetX((Window.GetWidth() - track.image.GetWidth()) / 2);
+          track.sprite.SetY(Window.GetHeight() / 2 + 70);
+
+          fill.original = Image("fill.png");
+          fill.sprite = Sprite();
+          fill.sprite.SetX(track.sprite.GetX());
+          fill.sprite.SetY(track.sprite.GetY());
+
+          status.image = Image.Text("Starting Privora", 0.82, 0.86, 0.96);
+          status.sprite = Sprite(status.image);
+          status.sprite.SetX((Window.GetWidth() - status.image.GetWidth()) / 2);
+          status.sprite.SetY(track.sprite.GetY() + 32);
+
+          fun progress_callback(duration, progress)
+          {
+              if (progress < 0) progress = 0;
+              if (progress > 1) progress = 1;
+              width = Math.Int(fill.original.GetWidth() * progress);
+              if (width < 2) width = 2;
+              fill.image = fill.original.Scale(width, fill.original.GetHeight());
+              fill.sprite.SetImage(fill.image);
+          }
+          Plymouth.SetBootProgressFunction(progress_callback);
+
+          # Suppress raw status/debug messages in the graphical splash. They are
+          # still available in the journal for diagnostics.
+          fun message_callback(text) { }
+          Plymouth.SetMessageFunction(message_callback);
+          PLYSCRIPT
+
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAlgAAAAKCAYAAABovyAJAAAASElEQVR42u3WQQ0AAAjEMMC/5yFjRxMFfXpnZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmbmA7h7AhPZC/5gAAAAAElFTkSuQmCC' | base64 -d > "$theme/track.png"
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAlgAAAAKCAYAAABovyAJAAAAfUlEQVR42u3WwQ2AIBAF0ZnY/lt2oIVGkLwEQYnj85fM3My5SxVw2G4n8j3nKtd13fe6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6rus6/AF8ZwFf9ONv+AAAAABJRU5ErkJggg==' | base64 -d > "$theme/fill.png"
+
+          mkdir -p distro/config/hooks/live
+          cat > distro/config/hooks/live/0098-privora-plymouth.hook.chroot <<'PLYHOOK'
+          #!/bin/sh
+          set -eu
+          theme=/usr/share/plymouth/themes/privora
+          mkdir -p "$theme"
+          logo="$(find /usr/share/privora/branding/logo -maxdepth 2 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print 2>/dev/null | head -n1 || true)"
+          if [ -z "$logo" ]; then
+              echo "ERROR: canonical Privora logo not found for Plymouth theme" >&2
+              exit 1
+          fi
+          cp "$logo" "$theme/logo.png"
+          if command -v plymouth-set-default-theme >/dev/null 2>&1; then
+              plymouth-set-default-theme privora
+          fi
+          if [ -f /etc/plymouth/plymouthd.conf ]; then
+              sed -i 's/^Theme=.*/Theme=privora/' /etc/plymouth/plymouthd.conf || true
+          else
+              mkdir -p /etc/plymouth
+              printf '[Daemon]\nTheme=privora\nShowDelay=0\n' > /etc/plymouth/plymouthd.conf
+          fi
+          update-initramfs -u -k all
+          PLYHOOK
+          chmod +x distro/config/hooks/live/0098-privora-plymouth.hook.chroot
+
+          # Disable any legacy Privora desktop-session splash autostart. This is
+          # what prevents a closable window containing debug/JSON text from
+          # appearing after Plasma is already running.
+          cat > distro/config/hooks/live/0097-disable-legacy-privora-splash.hook.chroot <<'NOSPLASH'
+          #!/bin/sh
+          set -eu
+          for f in /etc/xdg/autostart/*.desktop; do
+              [ -f "$f" ] || continue
+              if grep -Eqi '(privora.*splash|splash.*privora)' "$f"; then
+                  grep -q '^Hidden=true$' "$f" || printf '\nHidden=true\n' >> "$f"
+              fi
+          done
+          NOSPLASH
+          chmod +x distro/config/hooks/live/0097-disable-legacy-privora-splash.hook.chroot
+
+          # 3) Present the choice before mounting/starting the graphical desktop.
+          # BIOS and UEFI both show the same Install / Try Live decision.
+          mkdir -p distro/config/bootloaders/isolinux
+          cat > distro/config/bootloaders/isolinux/isolinux.cfg <<'ISOCFG'
+          include menu.cfg
+          default vesamenu.c32
+          prompt 0
+          timeout 200
+          ontimeout live
+          serial 0 115200
+          ISOCFG
+
+          cat > distro/config/bootloaders/isolinux/menu.cfg <<'ISOMENU'
+          menu title Privora 4.0
+          menu margin 8
+          menu rows 8
+          menu tabmsg Press Enter to continue
+
+          label install
+            menu label ^Install Privora
+            kernel /live/vmlinuz
+            append initrd=/live/initrd.img boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=install
+
+          label live
+            menu label ^Try Privora Live
+            menu default
+            kernel /live/vmlinuz
+            append initrd=/live/initrd.img boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=live
+
+          label safe
+            menu label Privora ^Safe Graphics
+            kernel /live/vmlinuz
+            append initrd=/live/initrd.img boot=live components quiet splash nomodeset privora.mode=live
+          ISOMENU
+
+          for grubdir in grub-efi grub-pc; do
+              mkdir -p "distro/config/bootloaders/$grubdir"
+              cat > "distro/config/bootloaders/$grubdir/grub.cfg" <<'GRUBCFG'
+          set default=1
+          set timeout_style=menu
+          set timeout=20
+          insmod all_video
+          insmod gfxterm
+          terminal_output gfxterm
+
+          menuentry 'Install Privora' {
+              linux /live/vmlinuz boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=install
+              initrd /live/initrd.img
+          }
+
+          menuentry 'Try Privora Live' {
+              linux /live/vmlinuz boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=live
+              initrd /live/initrd.img
+          }
+
+          menuentry 'Privora Safe Graphics' {
+              linux /live/vmlinuz boot=live components quiet splash nomodeset privora.mode=live
+              initrd /live/initrd.img
+          }
+          GRUBCFG
+          done
+
+          # 4) Make Install Privora launch reliably from both boot mode and desktop.
+          rootfs=distro/config/includes.chroot
+          mkdir -p "$rootfs/usr/local/bin" "$rootfs/usr/share/applications"                    "$rootfs/etc/xdg/autostart" "$rootfs/etc/skel/Desktop"
+
+          cat > "$rootfs/usr/local/bin/privora-installer-launch" <<'INSTALLER'
+          #!/bin/sh
+          set -u
+          logdir="${XDG_CACHE_HOME:-$HOME/.cache}/privora"
+          mkdir -p "$logdir"
+          log="$logdir/installer.log"
+          {
+              echo "=== Privora installer launch $(date -Is) ==="
+              echo "user=$(id -un) display=${DISPLAY:-} wayland=${WAYLAND_DISPLAY:-}"
+              echo "cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
+          } >> "$log"
+
+          # GTK4/VM rendering fallback prevents an otherwise blank installer
+          # surface on systems without working accelerated rendering.
+          export GSK_RENDERER="${GSK_RENDERER:-cairo}"
+          export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
+
+          if command -v privora-installer >/dev/null 2>&1; then
+              exec privora-installer >>"$log" 2>&1
+          fi
+          if command -v calamares >/dev/null 2>&1; then
+              if command -v pkexec >/dev/null 2>&1; then
+                  exec pkexec env GSK_RENDERER="$GSK_RENDERER" calamares >>"$log" 2>&1
+              fi
+              exec calamares >>"$log" 2>&1
+          fi
+
+          msg="Privora Installer is not installed in this Live image. Diagnostic log: $log"
+          echo "$msg" >> "$log"
+          if command -v kdialog >/dev/null 2>&1; then
+              kdialog --error "$msg"
+          elif command -v xmessage >/dev/null 2>&1; then
+              xmessage "$msg"
+          fi
+          exit 127
+          INSTALLER
+
+          cat > "$rootfs/usr/local/bin/privora-install-mode-autostart" <<'AUTOINSTALL'
+          #!/bin/sh
+          if grep -qw 'privora.mode=install' /proc/cmdline; then
+              sleep 2
+              exec /usr/local/bin/privora-installer-launch
+          fi
+          exit 0
+          AUTOINSTALL
+          chmod +x "$rootfs/usr/local/bin/privora-installer-launch"                    "$rootfs/usr/local/bin/privora-install-mode-autostart"
+
+          cat > "$rootfs/usr/share/applications/install-privora.desktop" <<'DESKTOP'
+          [Desktop Entry]
+          Type=Application
+          Name=Install Privora
+          Comment=Install Privora on this computer
+          Exec=/usr/local/bin/privora-installer-launch
+          Icon=privora
+          Terminal=false
+          Categories=System;
+          StartupNotify=true
+          DESKTOP
+          cp "$rootfs/usr/share/applications/install-privora.desktop"              "$rootfs/etc/skel/Desktop/Install Privora.desktop"
+          chmod +x "$rootfs/etc/skel/Desktop/Install Privora.desktop"
+
+          cat > "$rootfs/etc/xdg/autostart/privora-install-mode.desktop" <<'AUTOD'
+          [Desktop Entry]
+          Type=Application
+          Name=Privora Install Mode
+          Exec=/usr/local/bin/privora-install-mode-autostart
+          Terminal=false
+          NoDisplay=true
+          OnlyShowIn=KDE;
+          X-KDE-autostart-after=panel
+          AUTOD
+
+          # 5) Enable multiple Plasma desktops/workspaces out of the box.
+          mkdir -p "$rootfs/etc/skel/.config"
+          python3 - <<'KWIN'
+          from pathlib import Path
+          p=Path("distro/config/includes.chroot/etc/skel/.config/kwinrc")
+          s=p.read_text() if p.exists() else ""
+          lines=s.splitlines()
+          out=[]
+          in_group=False
+          seen=False
+          for line in lines:
+              if line.startswith("[") and line.endswith("]"):
+                  if in_group and not seen:
+                      out.extend(["Number=4","Rows=2"])
+                  in_group=(line=="[Desktops]")
+                  seen=False
+                  out.append(line)
+                  continue
+              if in_group and (line.startswith("Number=") or line.startswith("Rows=")):
+                  if not seen:
+                      out.extend(["Number=4","Rows=2"])
+                      seen=True
+                  continue
+              out.append(line)
+          if in_group and not seen:
+              out.extend(["Number=4","Rows=2"])
+          if "[Desktops]" not in s:
+              if out and out[-1] != "": out.append("")
+              out.extend(["[Desktops]","Number=4","Rows=2"])
+          p.write_text("\n".join(out).rstrip()+"\n")
+          KWIN
+
+          cat > "$rootfs/usr/share/applications/privora-workspaces.desktop" <<'WORKSPACES'
+          [Desktop Entry]
+          Type=Application
+          Name=Virtual Desktops
+          Comment=Create, remove, and arrange Privora workspaces
+          Exec=systemsettings kcm_kwin_virtualdesktops
+          Icon=preferences-desktop-virtual
+          Terminal=false
+          Categories=Settings;DesktopSettings;
+          WORKSPACES
+
+          # Static regression checks for the exact Live UX requirements.
+          grep -q 'LIVE_USERNAME="privora"' "$rootfs/etc/live/config.conf.d/privora.conf"
+          grep -q 'LIVE_USER_FULLNAME="Privora User"' "$rootfs/etc/live/config.conf.d/privora.conf"
+          grep -q 'ontimeout live' distro/config/bootloaders/isolinux/isolinux.cfg
+          grep -q "menuentry 'Install Privora'" distro/config/bootloaders/grub-efi/grub.cfg
+          grep -q "menuentry 'Try Privora Live'" distro/config/bootloaders/grub-efi/grub.cfg
+          grep -q 'Plymouth.SetBootProgressFunction' "$theme/privora.script"
+          grep -q 'Number=4' "$rootfs/etc/skel/.config/kwinrc"
+          grep -q 'Exec=/usr/local/bin/privora-installer-launch' "$rootfs/usr/share/applications/install-privora.desktop"
+          bash -n "$rootfs/usr/local/bin/privora-installer-launch"
+          bash -n "$rootfs/usr/local/bin/privora-install-mode-autostart"
+          echo 'PASS: Privora boot chooser, real Plymouth splash, Privora User, installer launcher, and Plasma workspaces configured'
+          CONTAINER
+
+
       - name: Build installer-first ISO
         shell: bash
         run: |
