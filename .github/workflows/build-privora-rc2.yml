@@ -770,9 +770,13 @@ jobs:
           logo.sprite.SetX((Window.GetWidth() - logo.scaled.GetWidth()) / 2);
           logo.sprite.SetY((Window.GetHeight() - logo.scaled.GetHeight()) / 2 - 70);
 
-          track.image = Image("track.png");
+          bar.width = 600;
+          bar.height = 10;
+
+          track.original = Image("track.png");
+          track.image = track.original.Scale(bar.width, bar.height);
           track.sprite = Sprite(track.image);
-          track.sprite.SetX((Window.GetWidth() - track.image.GetWidth()) / 2);
+          track.sprite.SetX((Window.GetWidth() - bar.width) / 2);
           track.sprite.SetY(Window.GetHeight() / 2 + 70);
 
           fill.original = Image("fill.png");
@@ -789,9 +793,9 @@ jobs:
           {
               if (progress < 0) progress = 0;
               if (progress > 1) progress = 1;
-              width = Math.Int(fill.original.GetWidth() * progress);
+              width = Math.Int(bar.width * progress);
               if (width < 2) width = 2;
-              fill.image = fill.original.Scale(width, fill.original.GetHeight());
+              fill.image = fill.original.Scale(width, bar.height);
               fill.sprite.SetImage(fill.image);
           }
           Plymouth.SetBootProgressFunction(progress_callback);
@@ -802,8 +806,9 @@ jobs:
           Plymouth.SetMessageFunction(message_callback);
           PLYSCRIPT
 
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAlgAAAAKCAYAAABovyAJAAAASElEQVR42u3WQQ0AAAjEMMC/5yFjRxMFfXpnZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmbmA7h7AhPZC/5gAAAAAElFTkSuQmCC' | base64 -d > "$theme/track.png"
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAlgAAAAKCAYAAABovyAJAAAAfUlEQVR42u3WwQ2AIBAF0ZnY/lt2oIVGkLwEQYnj85fM3My5SxVw2G4n8j3nKtd13fe6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6ruu6rus6/AF8ZwFf9ONv+AAAAABJRU5ErkJggg==' | base64 -d > "$theme/fill.png"
+          # Valid 1x1 RGBA PNGs; Plymouth scales them to the requested bar size.
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPQMHD7DwACwAGefbYNgwAAAABJRU5ErkJggg==' | base64 -d > "$theme/track.png"
+          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNguPT/PwAFeALRkl0UoAAAAABJRU5ErkJggg==' | base64 -d > "$theme/fill.png"
 
           mkdir -p distro/config/hooks/live
           cat > distro/config/hooks/live/0098-privora-plymouth.hook.chroot <<'PLYHOOK'
