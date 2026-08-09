@@ -1,85 +1,70 @@
-name: Build Privora 4.0 RC2 Installer ISO — v15 BIOS Menu Fix
+name: Build Privora 4.0 RC2 — Privora Prism 1.0
 
 on:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   installer-amd64:
     runs-on: ubuntu-latest
-    timeout-minutes: 300
+    timeout-minutes: 180
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
-      - name: Reclaim runner disk space before build
+      - name: Reclaim runner disk space
         shell: bash
         run: |
           set -euxo pipefail
           echo 'Disk before cleanup:'
           df -h /
-
-          # ubuntu-latest includes large SDK stacks that this Linux ISO build does not use.
-          sudo rm -rf /usr/local/lib/android || true
-          sudo rm -rf /usr/share/dotnet || true
-          sudo rm -rf /opt/ghc || true
-          sudo rm -rf /usr/local/.ghcup || true
-          sudo rm -rf /usr/local/share/boost || true
-          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af --volumes || true
           sudo apt-get clean || true
-          docker image prune -af || true
-
           echo 'Disk after cleanup:'
           df -h /
 
-      - name: Locate and unpack Privora RC2 source
+      - name: Locate and unpack permanent Privora source
         shell: bash
         run: |
           set -euxo pipefail
-          echo 'Repository files after checkout:'
-          find . -maxdepth 4 -type f -printf '%p\n' | sort | sed -n '1,250p'
-
           SOURCE_ZIP=''
-          if [ -f ./Privora-4.0-RC2-Web-Source.zip ]; then
-            SOURCE_ZIP=./Privora-4.0-RC2-Web-Source.zip
+          if [ -f Privora-4.0-RC2-Web-Source.zip ]; then
+            SOURCE_ZIP="$PWD/Privora-4.0-RC2-Web-Source.zip"
           else
-            SOURCE_ZIP="$(find . -type f \
-              \( -iname 'Privora-4.0-RC2-Web-Source*.zip' -o -iname '*Privora*RC2*Source*.zip' \) \
-              -printf '%s %p\n' | sort -nr | head -n1 | cut -d' ' -f2-)"
+            SOURCE_ZIP=$(find . -maxdepth 3 -type f \( -iname 'Privora-4.0-RC2-Web-Source.zip' -o -iname '*Privora*RC2*Source*.zip' \) -printf '%s %p\n' | sort -nr | head -n1 | cut -d' ' -f2- || true)
           fi
-
           if [ -z "$SOURCE_ZIP" ] || [ ! -f "$SOURCE_ZIP" ]; then
-            echo 'ERROR: No Privora RC2 source ZIP was found in the repository.' >&2
+            echo 'ERROR: No Privora RC2 source ZIP was found.' >&2
+            find . -maxdepth 3 -type f -printf '%p\n' | sort >&2
             exit 1
           fi
-
-          echo "Using Privora source archive: $SOURCE_ZIP"
+          echo "Using source archive: $SOURCE_ZIP"
           unzip -t "$SOURCE_ZIP" >/dev/null
-
           BUILDROOT="$RUNNER_TEMP/privora-build"
           rm -rf "$BUILDROOT"
           mkdir -p "$BUILDROOT/src" "$BUILDROOT/output"
           unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
-
           if [ ! -f "$BUILDROOT/src/VERSION" ]; then
-            VERSION_FILE="$(find "$BUILDROOT/src" -mindepth 2 -maxdepth 3 -type f -name VERSION -print -quit)"
-            if [ -n "$VERSION_FILE" ]; then
-              SOURCE_ROOT="$(dirname "$VERSION_FILE")"
-              mkdir -p "$BUILDROOT/flat"
-              cp -a "$SOURCE_ROOT"/. "$BUILDROOT/flat"/
-              rm -rf "$BUILDROOT/src"
-              mv "$BUILDROOT/flat" "$BUILDROOT/src"
-            fi
+            VERSION_FILE=$(find "$BUILDROOT/src" -mindepth 2 -maxdepth 3 -type f -name VERSION -print -quit)
+            [ -n "$VERSION_FILE" ] || { echo 'VERSION file missing from source ZIP' >&2; exit 1; }
+            SOURCE_ROOT=$(dirname "$VERSION_FILE")
+            mkdir -p "$BUILDROOT/flat"
+            cp -a "$SOURCE_ROOT"/. "$BUILDROOT/flat"/
+            rm -rf "$BUILDROOT/src"
+            mv "$BUILDROOT/flat" "$BUILDROOT/src"
           fi
-
-          test -f "$BUILDROOT/src/VERSION"
           test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc2'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.0.0'
           chmod -R u+rwX "$BUILDROOT/src"
           find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
           echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
           df -h /
 
-      - name: Start Debian 13 Privora build container
+      - name: Start Debian 13 build container
         shell: bash
         run: |
           set -euxo pipefail
@@ -112,1097 +97,152 @@ jobs:
           SOURCES
           apt-get update
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            git ca-certificates unzip live-build debootstrap squashfs-tools xorriso \
+            ca-certificates git unzip xz-utils live-build debootstrap squashfs-tools xorriso \
             syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
             dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
             dpkg-dev python3 gzip coreutils gcc binutils file
-
-          # ci/validate.sh builds the PrivoraKernel research target as a source-integrity gate.
-          # Keep the toolchain explicit so the minimal Debian container fails early and clearly.
-          for tool in gcc ld readelf nm file; do
-            command -v "$tool" >/dev/null || { echo "ERROR: required validation tool missing: $tool" >&2; exit 127; }
+          for tool in gcc ld readelf nm file dpkg-deb dpkg-scanpackages xorriso lb; do
+            command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 127; }
           done
-          gcc --version | head -n1
-          ld --version | head -n1
-
           apt-get clean
           rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
-          df -h / /work
           CONTAINER
 
-      - name: Apply RC2 compatibility and disk-footprint fixes
+      - name: Validate permanent source tree
         shell: bash
         run: |
           set -euxo pipefail
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
           cd /work/src
-          python3 - <<'PYFIX'
-          from pathlib import Path
-
-          # Debian 13 PolicyKit package split.
-          for path in Path('.').rglob('*'):
-              if not path.is_file():
-                  continue
-              try:
-                  text = path.read_text()
-              except Exception:
-                  continue
-              if 'policykit-1' in text:
-                  path.write_text(text.replace('policykit-1', 'polkitd pkexec'))
-
-          # Co-installable BIOS/UEFI GRUB module packages for the live environment.
-          for path in Path('.').rglob('*'):
-              if not path.is_file():
-                  continue
-              try:
-                  text = path.read_text()
-              except Exception:
-                  continue
-              new = text.replace('grub-efi-amd64 grub-pc', 'grub-efi-amd64-bin grub-pc-bin grub2-common')
-              new = new.replace('grub-pc grub-efi-amd64', 'grub-pc-bin grub-efi-amd64-bin grub2-common')
-              if new != text:
-                  path.write_text(new)
-
-          # privora-platform is canonical owner of these backend helper commands.
-          deb_builder = Path('tools/build-first-party-debs.py')
-          bs = deb_builder.read_text()
-          old_backend = "    'privora-oem','privora-cloud','privora-connect','privora-ai','privora-apply-branding'\n"
-          new_backend = "    'privora-oem','privora-cloud','privora-connect','privora-ai','privora-apply-branding',\n    'privora-hardware-compat','privora-update-rollback-plan'\n"
-          if old_backend in bs:
-              deb_builder.write_text(bs.replace(old_backend, new_backend, 1))
-
-          # Plasma + Standard dependencies already live inside filesystem.squashfs.
-          # The selected-profile offline repository therefore only needs the two
-          # Privora metapackages instead of duplicating their entire Debian closure.
-          repo = Path('tools/build-offline-installer-repo.sh')
-          repo.write_text("""#!/usr/bin/env bash
-          set -euo pipefail
-          root=$(cd \"$(dirname \"$0\")/..\" && pwd)
-          out=\"$root/distro/config/includes.binary/privora-repo\"
-          desktop=${DESKTOP:-plasma}
-          edition=${EDITION:-standard}
-          rm -rf \"$out\"
-          mkdir -p \"$out/pool\"
-          command -v dpkg-scanpackages >/dev/null || { echo 'dpkg-scanpackages required' >&2; exit 127; }
-          \"$root/tools/build-first-party-debs.py\" >/dev/null
-          cp \"$root\"/release/debs/privora-desktop-${desktop}_*.deb \"$out/pool/\"
-          cp \"$root\"/release/debs/privora-edition-${edition}_*.deb \"$out/pool/\"
-          (
-            cd \"$out\"
-            dpkg-scanpackages pool /dev/null > Packages
-            gzip -9c Packages > Packages.gz
-            sha256sum Packages Packages.gz > SHA256SUMS
-          )
-          printf '%s\\n' \\
-            'Privora 4.0 RC2 selected-profile offline repository.' \\
-            'Plasma + Standard dependencies are already present in the copied live filesystem.' \\
-            > \"$out/README.txt\"
-          printf 'Offline installer repository: %s packages\\n' \"$(find \"$out/pool\" -type f -name '*.deb' | wc -l)\"
-          """)
-
-          # During profile activation, use only the on-media repository. Dependencies
-          # are already installed in the copied Plasma + Standard live filesystem.
-          engine = Path('installer/live/privora-install-engine')
-          es = engine.read_text()
-          old = "    cmd(['apt-get','update','-o','Acquire::Languages=none'],chroot=True)\n    cmd(['apt-get','install','-y','--no-install-recommends',f'privora-desktop-{desktop}',f'privora-edition-{edition}'],chroot=True)\n"
-          new = "    offline_opts=['-o','Dir::Etc::sourcelist=/etc/apt/sources.list.d/privora-offline.list','-o','Dir::Etc::sourceparts=-','-o','Acquire::Languages=none']\n    cmd(['apt-get','update']+offline_opts,chroot=True)\n    cmd(['apt-get','install','-y','--no-install-recommends']+offline_opts+[f'privora-desktop-{desktop}',f'privora-edition-{edition}'],chroot=True)\n"
-          if old in es:
-              es = es.replace(old, new, 1)
-          anchor = "    emit('packages',72,f'Installing {desktop} desktop and {edition} application profile')\n"
-          if "dpkg','--add-architecture','i386" not in es and anchor in es:
-              es = es.replace(anchor, anchor + "    if edition=='gaming': cmd(['dpkg','--add-architecture','i386'],chroot=True)\n", 1)
-          engine.write_text(es)
-
-          # Keep APT indexes out of the final live filesystem and explicitly select xz.
-          auto = Path('distro/auto/config')
-          a = auto.read_text()
-          needle = '  --apt-secure true \\\n'
-          if '--apt-indices false' not in a and needle in a:
-              a = a.replace(needle, needle + '  --apt-indices false \\\n  --chroot-squashfs-compression-type xz \\\n', 1)
-          auto.write_text(a)
-
-          # Late cleanup runs inside the chroot before SquashFS generation.
-          hook = Path('distro/config/hooks/live/0999-privora-build-cleanup.hook.chroot')
-          hook.write_text("""#!/bin/sh
-          set -eu
-          apt-get clean || true
-          rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/* /tmp/* /var/tmp/*
-          find /var/log -type f -exec truncate -s 0 {} \\; 2>/dev/null || true
-          """)
-
-          # Avoid creating a second full-size copy of the finished ISO.
-          build = Path('distro/build.sh')
-          b = build.read_text()
-          old_copy = '  cp --reflink=auto "$image" "$out" 2>/dev/null || cp "$image" "$out"\n'
-          if old_copy in b:
-              b = b.replace(old_copy, '  mv "$image" "$out"\n', 1)
-          build.write_text(b)
-          PYFIX
-
-          chmod +x tools/build-offline-installer-repo.sh \
-                   installer/live/privora-install-engine \
-                   distro/config/hooks/live/0999-privora-build-cleanup.hook.chroot
-          bash -n tools/build-offline-installer-repo.sh
-          bash -n distro/build.sh
-          bash -n distro/auto/config
+          ./tools/render-boot-menus.py
+          ./prism/tools/audit.sh
+          python3 tests/prism-environment-test.py
+          python3 tests/source-of-truth-regression-test.py
+          python3 tests/live-build-static-test.py
+          python3 tests/grub-live-package-test.py
+          python3 tests/branding-static-test.py
+          python3 tests/boot-marker-static-test.py
+          python3 installer/tests/first-party-installer-static-test.py
+          python3 installer/tests/safety-test.py
+          python3 installer/tests/recommendation-test.py
+          python3 tools/build-first-party-debs.py
+          python3 tools/check-deb-collisions.py
+          rm -rf prism/.build release/.deb-work
           CONTAINER
 
-
-      - name: Repair RC2 live and installed boot certification wiring
+      - name: Build Privora Prism installer ISO
         shell: bash
         run: |
           set -euxo pipefail
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
-          cd /work/src
-
-          # Debian Live ISO BIOS boot uses ISOLINUX.  A menu without an
-          # isolinux.cfg timeout can sit forever in an unattended QEMU run.
-          # Keep "Install Privora" as the normal first/default entry, but make
-          # it auto-start after five seconds so both humans and CI get the same
-          # real ISO boot path.
-          mkdir -p distro/config/bootloaders/isolinux
-          cat > distro/config/bootloaders/isolinux/isolinux.cfg <<'ISOCFG'
-          include menu.cfg
-          default vesamenu.c32
-          prompt 0
-          timeout 50
-          ontimeout install
-          serial 0 115200
-          ISOCFG
-
-          python3 - <<'BOOTCFG'
-          from pathlib import Path
-          import re
-
-          menu = Path("distro/config/bootloaders/isolinux/menu.cfg")
-          s = menu.read_text()
-          # Remove the invalid/ambiguous top-level "default install" directive.
-          s = s.replace("default install\n", "")
-          # Mark the Install label as the menu default.
-          marker = "label install\n  menu label Install Privora\n"
-          if marker in s and "label install\n  menu label Install Privora\n  menu default\n" not in s:
-              s = s.replace(marker, marker + "  menu default\n", 1)
-          menu.write_text(s)
-
-          # Keep UEFI GRUB deterministic as well.
-          for rel in (
-              "distro/config/bootloaders/grub-efi/grub.cfg",
-              "distro/config/bootloaders/grub-pc/grub.cfg",
-          ):
-              p = Path(rel)
-              if p.exists():
-                  g = p.read_text()
-                  g = re.sub(r"(?m)^set timeout=.*$", "set timeout=5", g)
-                  if "set timeout_style=menu" not in g:
-                      g = g.replace("set default=0\n", "set default=0\nset timeout_style=menu\n", 1)
-                  p.write_text(g)
-
-          iso = Path("distro/config/bootloaders/isolinux/isolinux.cfg").read_text()
-          assert "prompt 0" in iso
-          assert "timeout 50" in iso
-          assert "ontimeout install" in iso
-          m = menu.read_text()
-          assert "label install" in m and "menu default" in m
-          print("PASS: BIOS ISOLINUX unattended auto-boot configured")
-          BOOTCFG
-
-          unitdir=distro/config/includes.chroot/usr/lib/systemd/system
-          wants=distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants
-          mkdir -p "$unitdir" "$wants"
-
-          cat > "$unitdir/privora-live-boot-marker.service" <<'UNIT'
-          [Unit]
-          Description=Privora Live boot certification marker
-          After=local-fs.target
-          ConditionKernelCommandLine=boot=live
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/lib/privora/live-boot-marker
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-
-          cat > "$unitdir/privora-installed-boot-marker.service" <<'UNIT'
-          [Unit]
-          Description=Privora installed-system boot certification marker
-          After=local-fs.target
-          ConditionPathExists=/etc/privora-release
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/lib/privora/installed-boot-marker
-          RemainAfterExit=yes
-
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-
-          cat > "$unitdir/privora-persistence-certifier.service" <<'UNIT'
-          [Unit]
-          Description=Privora persistence reboot certification
-          After=privora-live-boot-marker.service
-          ConditionKernelCommandLine=boot=live
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/lib/privora/persistence-certifier
-          TimeoutStartSec=90
-
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-
-          cat > "$unitdir/privora-install-core-certifier.service" <<'UNIT'
-          [Unit]
-          Description=Privora disposable-disk installation core certification
-          After=privora-live-boot-marker.service
-          ConditionKernelCommandLine=boot=live
-
-          [Service]
-          Type=oneshot
-          ExecStart=/usr/lib/privora/install-core-certifier
-          TimeoutStartSec=900
-
-          [Install]
-          WantedBy=multi-user.target
-          UNIT
-
-          # Use real .wants symlinks rather than copied unit files.
-          for unit in \
-            privora-live-boot-marker.service \
-            privora-installed-boot-marker.service \
-            privora-persistence-certifier.service \
-            privora-install-core-certifier.service
-          do
-            rm -f "$wants/$unit"
-            ln -s "/usr/lib/systemd/system/$unit" "$wants/$unit"
-          done
-
-          # Make the live boot marker observable both through COM1 and the console.
-          cat > distro/config/includes.chroot/usr/lib/privora/live-boot-marker <<'MARKER'
-          #!/bin/sh
-          set -eu
-          release=$(cat /etc/privora-release 2>/dev/null || awk -F= '$1=="VERSION_ID"{gsub(/"/,"",$2);print $2}' /etc/os-release)
-          msg="PRIVORA_LIVE_BOOT_OK release=${release:-unknown}"
-          printf '%s\n' "$msg" > /run/privora-live-boot-ok
-          if [ -c /dev/ttyS0 ]; then printf '%s\n' "$msg" > /dev/ttyS0 || true; fi
-          if [ -c /dev/console ]; then printf '%s\n' "$msg" > /dev/console || true; fi
-          logger -t privora-live "$msg" || true
-          MARKER
-          chmod +x distro/config/includes.chroot/usr/lib/privora/live-boot-marker
-
-          # Diagnostic real-media boot smoke test.  It still requires the ISO's
-          # BIOS/UEFI bootloader path to succeed; on failure it also tries the
-          # ISO kernel/initrd directly so the log tells us whether the problem is
-          # the bootloader or the live userspace.
-          cat > ci/qemu-live-smoke.sh <<'SMOKE'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          [[ $# -ge 1 ]] || { echo "Usage: $0 ISO [bios|uefi]" >&2; exit 2; }
-          iso=$(readlink -f "$1"); mode=${2:-bios}; timeout_s=${QEMU_TIMEOUT:-600}
-          [[ -f $iso ]] || { echo "ISO not found: $iso" >&2; exit 2; }
-          for t in qemu-system-x86_64 xorriso; do
-            command -v "$t" >/dev/null || { echo "$t required" >&2; exit 127; }
-          done
-
-          work=$(mktemp -d)
-          trap '[[ -z ${pid:-} ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
-          log="$work/serial.log"; qerr="$work/qemu.stderr"; : > "$log"; : > "$qerr"
-
-          echo "Inspecting ISO live payload before boot..."
-          echo "Using xorriso native -find (default echo action; no GNU find -print option)."
-          xorriso -indev "$iso" -ls /live 2>&1 | tee "$work/live-tree.txt"
-          for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
-            xorriso -indev "$iso" -find "$path" -type f -- 2>/dev/null | grep -Fq "$path" || {
-              echo "Required live payload missing from ISO: $path" >&2
-              exit 8
-            }
-          done
-
-          # Test the ISO-hybrid image as a raw boot disk.  This is the path that
-          # most closely models writing the ISO byte-for-byte to a USB stick.
-          args=(-machine q35,accel=tcg -m 3072 -smp 2 -cpu max
-                -display none -serial "file:$log" -monitor none -no-reboot -net none
-                -drive "if=none,id=privora_live,format=raw,readonly=on,file=$iso"
-                -device "virtio-blk-pci,drive=privora_live,bootindex=1")
-
-          if [[ $mode == uefi ]]; then
-            fw=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
-            vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
-            [[ -r $fw && -r $vars ]] || { echo 'OVMF firmware missing' >&2; exit 127; }
-            cp "$vars" "$work/vars.fd"
-            args+=(-drive "if=pflash,format=raw,readonly=on,file=$fw"
-                   -drive "if=pflash,format=raw,file=$work/vars.fd")
-          elif [[ $mode != bios ]]; then
-            echo 'mode must be bios or uefi' >&2
-            exit 2
-          fi
-
-          echo "Starting real $mode ISO-hybrid disk boot smoke test..."
-          qemu-system-x86_64 "${args[@]}" >"$work/qemu.stdout" 2>"$qerr" &
-          pid=$!
-          deadline=$((SECONDS+timeout_s))
-          while (( SECONDS < deadline )); do
-            if grep -q 'PRIVORA_LIVE_BOOT_OK' "$log"; then
-              grep 'PRIVORA_LIVE_BOOT_OK' "$log" | tail -n1
-              kill "$pid" 2>/dev/null || true
-              wait "$pid" 2>/dev/null || true
-              pid=''
-              echo "QEMU $mode ISO-hybrid boot: PASS"
-              exit 0
-            fi
-            if ! kill -0 "$pid" 2>/dev/null; then
-              echo "QEMU exited before boot marker ($mode)" >&2
-              echo "--- serial tail ---" >&2
-              tail -n 260 "$log" >&2 || true
-              echo "--- qemu stderr tail ---" >&2
-              tail -n 140 "$qerr" >&2 || true
-              exit 4
-            fi
-            sleep 2
-          done
-
-          echo "Timed out waiting for PRIVORA_LIVE_BOOT_OK ($mode)" >&2
-          echo "--- serial tail ---" >&2
-          tail -n 260 "$log" >&2 || true
-          echo "--- qemu stderr tail ---" >&2
-          tail -n 140 "$qerr" >&2 || true
-          kill "$pid" 2>/dev/null || true
-          wait "$pid" 2>/dev/null || true
-          pid=''
-
-          # Diagnostic only.  Boot the same kernel/initrd directly while keeping
-          # the ISO-hybrid image attached as /dev/vda and tell live-boot exactly
-          # where the medium is.  This distinguishes live-userspace problems
-          # from BIOS/UEFI bootloader problems.
-          mkdir -p "$work/direct"
-          if xorriso -osirrox on -indev "$iso" -extract /live/vmlinuz "$work/direct/vmlinuz" >/dev/null 2>&1 \
-             && xorriso -osirrox on -indev "$iso" -extract /live/initrd.img "$work/direct/initrd.img" >/dev/null 2>&1; then
-            dlog="$work/direct-serial.log"; : > "$dlog"
-            echo "Running direct-kernel hybrid-media diagnostic probe..." >&2
-            dargs=(-machine q35,accel=tcg -m 3072 -smp 2 -cpu max
-                   -display none -serial "file:$dlog" -monitor none -no-reboot -net none
-                   -drive "if=none,id=privora_live,format=raw,readonly=on,file=$iso"
-                   -device "virtio-blk-pci,drive=privora_live"
-                   -kernel "$work/direct/vmlinuz"
-                   -initrd "$work/direct/initrd.img"
-                   -append "boot=live components live-media=/dev/vda live-media-timeout=30 debug=1 console=tty0 console=ttyS0,115200 systemd.unit=multi-user.target")
-            qemu-system-x86_64 "${dargs[@]}" >"$work/direct.stdout" 2>"$work/direct.stderr" &
-            pid=$!
-            ddeadline=$((SECONDS+360))
-            while (( SECONDS < ddeadline )); do
-              if grep -q 'PRIVORA_LIVE_BOOT_OK' "$dlog"; then
-                grep 'PRIVORA_LIVE_BOOT_OK' "$dlog" | tail -n1 >&2
-                echo "DIAGNOSTIC: live kernel/userspace and hybrid medium are good; $mode bootloader path is the remaining failure." >&2
-                kill "$pid" 2>/dev/null || true
-                wait "$pid" 2>/dev/null || true
-                pid=''
-                exit 5
-              fi
-              if ! kill -0 "$pid" 2>/dev/null; then break; fi
-              sleep 2
-            done
-            kill "$pid" 2>/dev/null || true
-            wait "$pid" 2>/dev/null || true
-            pid=''
-            echo "DIAGNOSTIC: direct kernel + explicit live-media probe failed." >&2
-            tail -n 300 "$dlog" >&2 || true
-            tail -n 140 "$work/direct.stderr" >&2 || true
-          fi
-          exit 5
-          SMOKE
-          chmod +x ci/qemu-live-smoke.sh
-          bash -n ci/qemu-live-smoke.sh
-
-          # The destructive disposable-install certification must never be enabled
-          # in the normal user-facing boot menu. Boot the ISO's own kernel/initrd
-          # directly for this isolated test and add the certification flag only
-          # to that QEMU invocation. BIOS/UEFI ISO boot is tested separately.
-          cat > installer/vm/run-install-core-certification.sh <<'CERT'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          [[ $# -ge 1 ]] || { echo 'Usage: run-install-core-certification.sh ISO' >&2; exit 2; }
-          iso=$(readlink -f "$1"); timeout_s=${QEMU_TIMEOUT:-900}
-          [[ -f $iso ]] || { echo "ISO not found: $iso" >&2; exit 2; }
-          for t in qemu-system-x86_64 qemu-img xorriso; do
-            command -v "$t" >/dev/null || { echo "$t required" >&2; exit 127; }
-          done
-          fw=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
-          vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
-          [[ -r $fw && -r $vars ]] || { echo 'OVMF firmware missing' >&2; exit 127; }
-
-          work=$(mktemp -d)
-          trap '[[ -z ${pid:-} ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
-          disk="$work/install-target.qcow2"
-          log="$work/install.log"
-          cp "$vars" "$work/vars.fd"
-          qemu-img create -q -f qcow2 "$disk" "${INSTALL_DISK_SIZE:-24G}"
-
-          xorriso -osirrox on -indev "$iso" -extract /live/vmlinuz "$work/vmlinuz" >/dev/null 2>&1
-          xorriso -osirrox on -indev "$iso" -extract /live/initrd.img "$work/initrd.img" >/dev/null 2>&1
-          test -s "$work/vmlinuz"
-          test -s "$work/initrd.img"
-
-          common=(
-            -machine q35,accel=tcg -cpu max -m 4096 -smp 4
-            -display none -monitor none -net none
-            -drive "if=pflash,format=raw,readonly=on,file=$fw"
-            -drive "if=pflash,format=raw,file=$work/vars.fd"
-            -drive "if=none,id=target,format=qcow2,file=$disk"
-            -device "virtio-blk-pci,drive=target,serial=PRIVORA_TEST_DISK"
-            -device virtio-rng-pci
-          )
-
-          : > "$log"
-          qemu-system-x86_64 "${common[@]}" \
-            -kernel "$work/vmlinuz" \
-            -initrd "$work/initrd.img" \
-            -append "boot=live components console=tty0 console=ttyS0,115200 systemd.unit=multi-user.target privora.installer.certify=1" \
-            -cdrom "$iso" \
-            -serial "file:$log" >/dev/null 2>&1 &
-          pid=$!
-
-          deadline=$((SECONDS+timeout_s))
-          while ((SECONDS<deadline)); do
-            if grep -q 'PRIVORA_INSTALL_WRITE_OK' "$log"; then
-              wait "$pid" 2>/dev/null || true
-              pid=''
-              break
-            fi
-            if ! kill -0 "$pid" 2>/dev/null; then
-              echo 'installer VM exited before write marker' >&2
-              tail -n 250 "$log" >&2
-              exit 4
-            fi
-            sleep 2
-          done
-          grep -q 'PRIVORA_INSTALL_WRITE_OK' "$log" || {
-            echo 'timed out waiting for install write marker' >&2
-            tail -n 250 "$log" >&2
-            exit 5
-          }
-
-          # Fresh firmware vars model a new installed-system boot. This phase
-          # exercises the installed UEFI removable boot path from the test disk.
-          cp "$vars" "$work/vars-installed.fd"
-          : > "$work/installed.log"
-          args=(
-            -machine q35,accel=tcg -cpu max -m 3072 -smp 2
-            -display none -monitor none -net none -no-reboot
-            -drive "if=pflash,format=raw,readonly=on,file=$fw"
-            -drive "if=pflash,format=raw,file=$work/vars-installed.fd"
-            -drive "if=none,id=target,format=qcow2,file=$disk"
-            -device "virtio-blk-pci,drive=target,serial=PRIVORA_TEST_DISK"
-            -device virtio-rng-pci
-            -serial "file:$work/installed.log"
-          )
-          qemu-system-x86_64 "${args[@]}" >/dev/null 2>&1 &
-          pid=$!
-          deadline=$((SECONDS+420))
-          while ((SECONDS<deadline)); do
-            if grep -q 'PRIVORA_INSTALLED_BOOT_OK' "$work/installed.log"; then
-              grep 'PRIVORA_INSTALLED_BOOT_OK' "$work/installed.log" | tail -n1
-              kill "$pid" 2>/dev/null || true
-              wait "$pid" 2>/dev/null || true
-              pid=''
-              echo 'Privora disposable UEFI install + installed boot: PASS'
-              exit 0
-            fi
-            if ! kill -0 "$pid" 2>/dev/null; then
-              echo 'installed VM exited before boot marker' >&2
-              tail -n 250 "$work/installed.log" >&2
-              exit 6
-            fi
-            sleep 2
-          done
-          echo 'timed out waiting for PRIVORA_INSTALLED_BOOT_OK' >&2
-          tail -n 250 "$work/installed.log" >&2
-          exit 7
-          CERT
-          chmod +x installer/vm/run-install-core-certification.sh
-          bash -n installer/vm/run-install-core-certification.sh
-
-          python3 - <<'PYCHECK'
-          from pathlib import Path
-          root=Path('.')
-          unitdir=root/'distro/config/includes.chroot/usr/lib/systemd/system'
-          wants=root/'distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants'
-          names=[
-              'privora-live-boot-marker.service',
-              'privora-installed-boot-marker.service',
-              'privora-persistence-certifier.service',
-              'privora-install-core-certifier.service',
-          ]
-          for name in names:
-              text=(unitdir/name).read_text()
-              assert 'After=multi-user.target' not in text, name
-              assert (wants/name).is_symlink(), name
-          live=(unitdir/'privora-live-boot-marker.service').read_text()
-          assert 'ConditionKernelCommandLine=boot=live' in live
-          isolinux=(root/'distro/config/bootloaders/isolinux/isolinux.cfg').read_text()
-          assert 'prompt 0' in isolinux and 'timeout 50' in isolinux and 'ontimeout install' in isolinux
-          menu=(root/'distro/config/bootloaders/isolinux/menu.cfg').read_text()
-          assert 'label install' in menu and 'menu default' in menu
-          cert=(root/'installer/vm/run-install-core-certification.sh').read_text()
-          assert 'privora.installer.certify=1' in cert
-          assert '-kernel "$work/vmlinuz"' in cert
-          print('PASS: RC2 BIOS forced auto-boot, hybrid-media certification, ordering, and isolated install-certification wiring')
-          PYCHECK
-          CONTAINER
-
-      - name: Validate Privora source and first-party package ownership
-        shell: bash
-        run: |
-          set -euxo pipefail
-          docker exec -i privora-builder bash -s <<'CONTAINER'
-          set -euxo pipefail
-          cd /work/src
-          ./ci/validate.sh
-          ./tools/build-first-party-debs.py
-          python3 - <<'PYOWN'
-          from pathlib import Path
-          import itertools, subprocess
-          packages = {}
-          for deb in sorted(Path('release/debs').glob('*.deb')):
-              out = subprocess.check_output(['dpkg-deb','-c',str(deb)], text=True)
-              files = set()
-              for line in out.splitlines():
-                  parts = line.split()
-                  if not parts or parts[0].startswith('d'):
-                      continue
-                  path = parts[-1]
-                  if path.startswith('./'):
-                      path='/' + path[2:]
-                  files.add(path)
-              packages[deb.name]=files
-          collisions=[]
-          for a,b in itertools.combinations(sorted(packages),2):
-              for path in sorted(packages[a] & packages[b]):
-                  collisions.append((a,b,path))
-          if collisions:
-              for row in collisions:
-                  print('COLLISION:', *row)
-              raise SystemExit(1)
-          print(f'PASS: no file ownership collisions across {len(packages)} Privora packages')
-          PYOWN
-          df -h / /work
-          CONTAINER
-
-
-      - name: Apply Privora live UX recovery
-        shell: bash
-        run: |
-          set -euxo pipefail
-          docker exec -i privora-builder bash -s <<'CONTAINER'
-          set -euxo pipefail
-          cd /work/src
-
-          # 1) Brand the Debian Live account at creation time.
-          mkdir -p distro/config/includes.chroot/etc/live/config.conf.d
-          cat > distro/config/includes.chroot/etc/live/config.conf.d/privora.conf <<'LIVECFG'
-          LIVE_HOSTNAME="privora"
-          LIVE_USERNAME="privora"
-          LIVE_USER_FULLNAME="Privora User"
-          LIVECFG
-
-          # Ensure SDDM enters the Live desktop automatically after live-config
-          # creates the Privora account.
-          mkdir -p distro/config/includes.chroot/usr/lib/live/config
-          cat > distro/config/includes.chroot/usr/lib/live/config/9999-privora-sddm <<'SDDMHOOK'
-          #!/bin/sh
-          set -eu
-          [ -d /etc/sddm.conf.d ] || mkdir -p /etc/sddm.conf.d
-          cat > /etc/sddm.conf.d/99-privora-live.conf <<'EOF'
-          [Autologin]
-          User=privora
-          Relogin=false
-          EOF
-          exit 0
-          SDDMHOOK
-          chmod +x distro/config/includes.chroot/usr/lib/live/config/9999-privora-sddm
-
-          # 2) Replace the desktop/window splash with a real Plymouth boot splash.
-          # The theme is part of the initramfs, so it runs while the Live root is
-          # being discovered/mounted instead of opening as a closable GUI window.
-          mkdir -p distro/config/package-lists
-          cat > distro/config/package-lists/privora-live-ux.list.chroot <<'PKGS'
-          live-config
-          plymouth
-          plymouth-themes
-          PKGS
-
-          theme=distro/config/includes.chroot/usr/share/plymouth/themes/privora
-          mkdir -p "$theme"
-          cat > "$theme/privora.plymouth" <<'PLYTHEME'
-          [Plymouth Theme]
-          Name=Privora
-          Description=Privora graphical boot progress
-          ModuleName=script
-
-          [script]
-          ImageDir=/usr/share/plymouth/themes/privora
-          ScriptFile=/usr/share/plymouth/themes/privora/privora.script
-          PLYTHEME
-
-          cat > "$theme/privora.script" <<'PLYSCRIPT'
-          Window.SetBackgroundTopColor(0.010, 0.016, 0.035);
-          Window.SetBackgroundBottomColor(0.025, 0.030, 0.070);
-
-          logo.image = Image("logo.png");
-          logo.sprite = Sprite(logo.image);
-          logo.scale = 1;
-          if (logo.image.GetWidth() > Window.GetWidth() * 0.48)
-          {
-              logo.scale = (Window.GetWidth() * 0.48) / logo.image.GetWidth();
-          }
-          if (logo.image.GetHeight() * logo.scale > Window.GetHeight() * 0.26)
-          {
-              logo.scale = (Window.GetHeight() * 0.26) / logo.image.GetHeight();
-          }
-          logo.scaled = logo.image.Scale(logo.image.GetWidth() * logo.scale,
-                                         logo.image.GetHeight() * logo.scale);
-          logo.sprite.SetImage(logo.scaled);
-          logo.sprite.SetX((Window.GetWidth() - logo.scaled.GetWidth()) / 2);
-          logo.sprite.SetY((Window.GetHeight() - logo.scaled.GetHeight()) / 2 - 70);
-
-          bar.width = 600;
-          bar.height = 10;
-
-          track.original = Image("track.png");
-          track.image = track.original.Scale(bar.width, bar.height);
-          track.sprite = Sprite(track.image);
-          track.sprite.SetX((Window.GetWidth() - bar.width) / 2);
-          track.sprite.SetY(Window.GetHeight() / 2 + 70);
-
-          fill.original = Image("fill.png");
-          fill.sprite = Sprite();
-          fill.sprite.SetX(track.sprite.GetX());
-          fill.sprite.SetY(track.sprite.GetY());
-
-          status.image = Image.Text("Starting Privora", 0.82, 0.86, 0.96);
-          status.sprite = Sprite(status.image);
-          status.sprite.SetX((Window.GetWidth() - status.image.GetWidth()) / 2);
-          status.sprite.SetY(track.sprite.GetY() + 32);
-
-          fun progress_callback(duration, progress)
-          {
-              if (progress < 0) progress = 0;
-              if (progress > 1) progress = 1;
-              width = Math.Int(bar.width * progress);
-              if (width < 2) width = 2;
-              fill.image = fill.original.Scale(width, bar.height);
-              fill.sprite.SetImage(fill.image);
-          }
-          Plymouth.SetBootProgressFunction(progress_callback);
-
-          # Suppress raw status/debug messages in the graphical splash. They are
-          # still available in the journal for diagnostics.
-          fun message_callback(text) { }
-          Plymouth.SetMessageFunction(message_callback);
-          PLYSCRIPT
-
-          # Valid 1x1 RGBA PNGs; Plymouth scales them to the requested bar size.
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGPQMHD7DwACwAGefbYNgwAAAABJRU5ErkJggg==' | base64 -d > "$theme/track.png"
-          printf '%s' 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNguPT/PwAFeALRkl0UoAAAAABJRU5ErkJggg==' | base64 -d > "$theme/fill.png"
-
-          mkdir -p distro/config/hooks/live
-          cat > distro/config/hooks/live/0098-privora-plymouth.hook.chroot <<'PLYHOOK'
-          #!/bin/sh
-          set -eu
-          theme=/usr/share/plymouth/themes/privora
-          mkdir -p "$theme"
-          logo="$(find /usr/share/privora/branding/logo -maxdepth 2 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' \) -print 2>/dev/null | head -n1 || true)"
-          if [ -z "$logo" ]; then
-              echo "ERROR: canonical Privora logo not found for Plymouth theme" >&2
-              exit 1
-          fi
-          cp "$logo" "$theme/logo.png"
-          if command -v plymouth-set-default-theme >/dev/null 2>&1; then
-              plymouth-set-default-theme privora
-          fi
-          if [ -f /etc/plymouth/plymouthd.conf ]; then
-              sed -i 's/^Theme=.*/Theme=privora/' /etc/plymouth/plymouthd.conf || true
-          else
-              mkdir -p /etc/plymouth
-              printf '[Daemon]\nTheme=privora\nShowDelay=0\n' > /etc/plymouth/plymouthd.conf
-          fi
-          update-initramfs -u -k all
-          PLYHOOK
-          chmod +x distro/config/hooks/live/0098-privora-plymouth.hook.chroot
-
-          # Disable any legacy Privora desktop-session splash autostart. This is
-          # what prevents a closable window containing debug/JSON text from
-          # appearing after Plasma is already running.
-          cat > distro/config/hooks/live/0097-disable-legacy-privora-splash.hook.chroot <<'NOSPLASH'
-          #!/bin/sh
-          set -eu
-          for f in /etc/xdg/autostart/*.desktop; do
-              [ -f "$f" ] || continue
-              if grep -Eqi '(privora.*splash|splash.*privora)' "$f"; then
-                  grep -q '^Hidden=true$' "$f" || printf '\nHidden=true\n' >> "$f"
-              fi
-          done
-          NOSPLASH
-          chmod +x distro/config/hooks/live/0097-disable-legacy-privora-splash.hook.chroot
-
-          # 3) Present the choice before mounting/starting the graphical desktop.
-          # Keep BIOS ISOLINUX self-contained: do not use ONTIMEOUT with a label
-          # name. The Syslinux menu will boot MENU DEFAULT after TIMEOUT.
-          mkdir -p distro/config/bootloaders/isolinux
-          cat > distro/config/bootloaders/isolinux/isolinux.cfg <<'ISOCFG'
-          UI vesamenu.c32
-          PROMPT 0
-          TIMEOUT 200
-          SERIAL 0 115200
-
-          MENU TITLE Privora 4.0
-          MENU MARGIN 8
-          MENU ROWS 8
-          MENU TABMSG Select an option and press Enter
-
-          LABEL install
-            MENU LABEL ^Install Privora
-            LINUX /live/vmlinuz
-            INITRD /live/initrd.img
-            APPEND boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=install
-
-          LABEL live
-            MENU LABEL ^Try Privora Live
-            MENU DEFAULT
-            LINUX /live/vmlinuz
-            INITRD /live/initrd.img
-            APPEND boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=live
-
-          LABEL safe
-            MENU LABEL Privora ^Safe Graphics
-            LINUX /live/vmlinuz
-            INITRD /live/initrd.img
-            APPEND boot=live components quiet splash nomodeset privora.mode=live
-          ISOCFG
-
-          # Remove stale nested menu files from the custom template. The BIOS
-          # chooser above is intentionally the complete top-level menu.
-          rm -f distro/config/bootloaders/isolinux/menu.cfg
-
-          for grubdir in grub-efi grub-pc; do
-              mkdir -p "distro/config/bootloaders/$grubdir"
-              cat > "distro/config/bootloaders/$grubdir/grub.cfg" <<'GRUBCFG'
-          set default=1
-          set timeout_style=menu
-          set timeout=20
-          insmod all_video
-          insmod gfxterm
-          terminal_output gfxterm
-
-          menuentry 'Install Privora' {
-              linux /live/vmlinuz boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=install
-              initrd /live/initrd.img
-          }
-
-          menuentry 'Try Privora Live' {
-              linux /live/vmlinuz boot=live components quiet splash loglevel=3 systemd.show_status=false rd.udev.log_level=3 vt.global_cursor_default=0 privora.mode=live
-              initrd /live/initrd.img
-          }
-
-          menuentry 'Privora Safe Graphics' {
-              linux /live/vmlinuz boot=live components quiet splash nomodeset privora.mode=live
-              initrd /live/initrd.img
-          }
-          GRUBCFG
-          done
-
-          # 4) Make Install Privora launch reliably from both boot mode and desktop.
-          rootfs=distro/config/includes.chroot
-          mkdir -p "$rootfs/usr/local/bin" "$rootfs/usr/share/applications"                    "$rootfs/etc/xdg/autostart" "$rootfs/etc/skel/Desktop"
-
-          cat > "$rootfs/usr/local/bin/privora-installer-launch" <<'INSTALLER'
-          #!/bin/sh
-          set -u
-          logdir="${XDG_CACHE_HOME:-$HOME/.cache}/privora"
-          mkdir -p "$logdir"
-          log="$logdir/installer.log"
-          {
-              echo "=== Privora installer launch $(date -Is) ==="
-              echo "user=$(id -un) display=${DISPLAY:-} wayland=${WAYLAND_DISPLAY:-}"
-              echo "cmdline=$(cat /proc/cmdline 2>/dev/null || true)"
-          } >> "$log"
-
-          # GTK4/VM rendering fallback prevents an otherwise blank installer
-          # surface on systems without working accelerated rendering.
-          export GSK_RENDERER="${GSK_RENDERER:-cairo}"
-          export WEBKIT_DISABLE_COMPOSITING_MODE="${WEBKIT_DISABLE_COMPOSITING_MODE:-1}"
-
-          if command -v privora-installer >/dev/null 2>&1; then
-              exec privora-installer >>"$log" 2>&1
-          fi
-          if command -v calamares >/dev/null 2>&1; then
-              if command -v pkexec >/dev/null 2>&1; then
-                  exec pkexec env GSK_RENDERER="$GSK_RENDERER" calamares >>"$log" 2>&1
-              fi
-              exec calamares >>"$log" 2>&1
-          fi
-
-          msg="Privora Installer is not installed in this Live image. Diagnostic log: $log"
-          echo "$msg" >> "$log"
-          if command -v kdialog >/dev/null 2>&1; then
-              kdialog --error "$msg"
-          elif command -v xmessage >/dev/null 2>&1; then
-              xmessage "$msg"
-          fi
-          exit 127
-          INSTALLER
-
-          cat > "$rootfs/usr/local/bin/privora-install-mode-autostart" <<'AUTOINSTALL'
-          #!/bin/sh
-          if grep -qw 'privora.mode=install' /proc/cmdline; then
-              sleep 2
-              exec /usr/local/bin/privora-installer-launch
-          fi
-          exit 0
-          AUTOINSTALL
-          chmod +x "$rootfs/usr/local/bin/privora-installer-launch"                    "$rootfs/usr/local/bin/privora-install-mode-autostart"
-
-          cat > "$rootfs/usr/share/applications/install-privora.desktop" <<'DESKTOP'
-          [Desktop Entry]
-          Type=Application
-          Name=Install Privora
-          Comment=Install Privora on this computer
-          Exec=/usr/local/bin/privora-installer-launch
-          Icon=privora
-          Terminal=false
-          Categories=System;
-          StartupNotify=true
-          DESKTOP
-          cp "$rootfs/usr/share/applications/install-privora.desktop"              "$rootfs/etc/skel/Desktop/Install Privora.desktop"
-          chmod +x "$rootfs/etc/skel/Desktop/Install Privora.desktop"
-
-          cat > "$rootfs/etc/xdg/autostart/privora-install-mode.desktop" <<'AUTOD'
-          [Desktop Entry]
-          Type=Application
-          Name=Privora Install Mode
-          Exec=/usr/local/bin/privora-install-mode-autostart
-          Terminal=false
-          NoDisplay=true
-          OnlyShowIn=KDE;
-          X-KDE-autostart-after=panel
-          AUTOD
-
-          # 5) Enable multiple Plasma desktops/workspaces out of the box.
-          mkdir -p "$rootfs/etc/skel/.config"
-          python3 - <<'KWIN'
-          from pathlib import Path
-          p=Path("distro/config/includes.chroot/etc/skel/.config/kwinrc")
-          s=p.read_text() if p.exists() else ""
-          lines=s.splitlines()
-          out=[]
-          in_group=False
-          seen=False
-          for line in lines:
-              if line.startswith("[") and line.endswith("]"):
-                  if in_group and not seen:
-                      out.extend(["Number=4","Rows=2"])
-                  in_group=(line=="[Desktops]")
-                  seen=False
-                  out.append(line)
-                  continue
-              if in_group and (line.startswith("Number=") or line.startswith("Rows=")):
-                  if not seen:
-                      out.extend(["Number=4","Rows=2"])
-                      seen=True
-                  continue
-              out.append(line)
-          if in_group and not seen:
-              out.extend(["Number=4","Rows=2"])
-          if "[Desktops]" not in s:
-              if out and out[-1] != "": out.append("")
-              out.extend(["[Desktops]","Number=4","Rows=2"])
-          p.write_text("\n".join(out).rstrip()+"\n")
-          KWIN
-
-          cat > "$rootfs/usr/share/applications/privora-workspaces.desktop" <<'WORKSPACES'
-          [Desktop Entry]
-          Type=Application
-          Name=Virtual Desktops
-          Comment=Create, remove, and arrange Privora workspaces
-          Exec=systemsettings kcm_kwin_virtualdesktops
-          Icon=preferences-desktop-virtual
-          Terminal=false
-          Categories=Settings;DesktopSettings;
-          WORKSPACES
-
-          # Static regression checks for the exact Live UX requirements.
-          grep -q 'LIVE_USERNAME="privora"' "$rootfs/etc/live/config.conf.d/privora.conf"
-          grep -q 'LIVE_USER_FULLNAME="Privora User"' "$rootfs/etc/live/config.conf.d/privora.conf"
-          ! grep -Eqi '^[[:space:]]*ONTIMEOUT([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
-          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+install([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
-          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+live([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
-          grep -Eqi '^[[:space:]]*MENU[[:space:]]+DEFAULT([[:space:]]|$)' distro/config/bootloaders/isolinux/isolinux.cfg
-          grep -Fq 'LINUX /live/vmlinuz' distro/config/bootloaders/isolinux/isolinux.cfg
-          grep -Fq 'INITRD /live/initrd.img' distro/config/bootloaders/isolinux/isolinux.cfg
-          grep -q "menuentry 'Install Privora'" distro/config/bootloaders/grub-efi/grub.cfg
-          grep -q "menuentry 'Try Privora Live'" distro/config/bootloaders/grub-efi/grub.cfg
-          grep -q 'Plymouth.SetBootProgressFunction' "$theme/privora.script"
-          grep -q 'Number=4' "$rootfs/etc/skel/.config/kwinrc"
-          grep -q 'Exec=/usr/local/bin/privora-installer-launch' "$rootfs/usr/share/applications/install-privora.desktop"
-          bash -n "$rootfs/usr/local/bin/privora-installer-launch"
-          bash -n "$rootfs/usr/local/bin/privora-install-mode-autostart"
-          echo 'PASS: Privora boot chooser, real Plymouth splash, Privora User, installer launcher, and Plasma workspaces configured'
-          CONTAINER
-
-
-      - name: Build installer-first ISO
-        shell: bash
-        run: |
-          set -euxo pipefail
-          docker exec -i privora-builder bash -s <<'CONTAINER'
-          set -euxo pipefail
-          cd /work/src
-          echo 'Disk immediately before live-build:'
-          df -h / /work
-          du -sh . distro/config/includes.binary 2>/dev/null || true
-          INSTALLER=1 \
-          OFFLINE_REPO=1 \
-          PERSISTENCE=1 \
-          DESKTOP=plasma \
-          EDITION=standard \
-          ARCHITECTURE=amd64 \
-          ./ci/build-live-iso.sh
-          echo 'Disk immediately after live-build:'
-          df -h / /work
-          du -sh distro/chroot distro/config/includes.binary/privora-repo 2>/dev/null || true
-          CONTAINER
-
-      - name: Preserve ISO and reclaim live-build workspace
-        shell: bash
-        run: |
-          set -euxo pipefail
-          docker exec -i privora-builder bash -s <<'CONTAINER'
-          set -euxo pipefail
-          cd /work/src
-          iso=$(find distro -maxdepth 1 -type f -name 'Privora-4.0-rc2-Installer-*.iso' -print -quit)
-          test -n "$iso"
-          ./tools/iso-preflight.py "$iso"
-          mkdir -p /work/output
-          mv "$iso" /work/output/
-          sha256sum /work/output/*.iso > /work/output/SHA256SUMS.txt
-          (cd distro && lb clean --purge) || true
-          rm -rf distro/chroot distro/binary distro/cache distro/.build \
-                 distro/config/includes.binary/privora-repo release/.offline-repo-work
-          apt-get clean || true
-          rm -rf /var/cache/apt/archives/* /tmp/* /var/tmp/* || true
-          df -h / /work
-          CONTAINER
-
-
-
-      - name: Verify ISO live payload and hybrid layout
-        shell: bash
-        run: |
-          set -euxo pipefail
-          docker exec -i privora-builder bash -s <<'CONTAINER'
-          set -euxo pipefail
-          ISO=$(find /work/output -maxdepth 1 -type f -name '*.iso' -print -quit)
+          cd /work/src/distro
+          DESKTOP=privora EDITION=standard INSTALLER=1 OFFLINE_REPO=1 PERSISTENCE=auto ./build.sh
+          ISO=$(find . -maxdepth 1 -type f -name 'Privora-4.0-rc2-Installer-privora-standard-amd64.iso' -print -quit)
           test -n "$ISO"
-          echo "ISO: $ISO"
+          test -s "$ISO"
+          mv "$ISO" /work/output/
+          if [ -f "$ISO.sha256" ]; then mv "$ISO.sha256" /work/output/; fi
+          cd /work/output
+          sha256sum Privora-4.0-rc2-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
+          cd /work/src/distro
+          lb clean --purge || true
+          rm -rf chroot binary cache .build || true
+          df -h / /work
+          CONTAINER
+
+      - name: Verify finished ISO identity and boot payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          ISO=/work/output/Privora-4.0-rc2-Installer-privora-standard-amd64.iso
+          test -s "$ISO"
           xorriso -indev "$ISO" -ls /live
           for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
             xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
           done
-
-          # Verify the exact BIOS config that ended up in the ISO, not merely
-          # the pre-build template.
           bootcheck=$(mktemp -d)
-          trap 'rm -rf "$bootcheck"' EXIT
           xorriso -osirrox on -indev "$ISO" -extract /isolinux/isolinux.cfg "$bootcheck/isolinux.cfg" >/dev/null 2>&1
-          echo '--- /isolinux/isolinux.cfg from finished ISO ---'
           cat "$bootcheck/isolinux.cfg"
           ! grep -Eqi '^[[:space:]]*ONTIMEOUT([[:space:]]|$)' "$bootcheck/isolinux.cfg"
-          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+install([[:space:]]|$)' "$bootcheck/isolinux.cfg"
-          grep -Eqi '^[[:space:]]*LABEL[[:space:]]+live([[:space:]]|$)' "$bootcheck/isolinux.cfg"
-          grep -Eqi '^[[:space:]]*MENU[[:space:]]+DEFAULT([[:space:]]|$)' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU DEFAULT' "$bootcheck/isolinux.cfg"
           grep -Fq 'LINUX /live/vmlinuz' "$bootcheck/isolinux.cfg"
           grep -Fq 'INITRD /live/initrd.img' "$bootcheck/isolinux.cfg"
-          echo 'PASS: finished ISO contains direct Privora BIOS chooser with valid Live kernel/initrd paths'
-
           xorriso -indev "$ISO" -report_el_torito plain || true
           xorriso -indev "$ISO" -report_system_area plain || true
+          rm -rf "$bootcheck"
           CONTAINER
 
-      - name: Upload built ISO candidate before VM certification
-        uses: actions/upload-artifact@v4
+      - name: Upload ISO candidate before VM certification
+        uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC2-ISO-Candidate-Uncertified
+          name: Privora-4.0-RC2-Prism-1.0-ISO-Candidate-Uncertified
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 3
+          compression-level: 0
 
-      - name: Install QEMU and certify BIOS, UEFI, and installation
+      - name: Install QEMU certification tools
         shell: bash
         run: |
           set -euxo pipefail
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
-          cat > /etc/apt/sources.list.d/debian.sources <<'SOURCES'
-          Types: deb
-          URIs: http://deb.debian.org/debian
-          Suites: trixie trixie-updates
-          Components: main contrib non-free non-free-firmware
-          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-
-          Types: deb
-          URIs: http://deb.debian.org/debian-security
-          Suites: trixie-security
-          Components: main contrib non-free non-free-firmware
-          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
-          SOURCES
           apt-get update
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils ovmf
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf
           apt-get clean
-          rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
-          cd /work/src
-          ISO=$(find /work/output -maxdepth 1 -type f -name '*.iso' -print -quit)
-          test -n "$ISO"
-          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
-          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
-          QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
+          rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
           CONTAINER
 
-      - name: Prepare download instructions
+      - name: Certify BIOS, UEFI, and disposable installation
         shell: bash
         run: |
           set -euxo pipefail
-          cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'TXT'
-          PRIVORA 4.0 RC2 - WINDOWS USB FLASHING
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+          ISO=/work/output/Privora-4.0-rc2-Installer-privora-standard-amd64.iso
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
+          QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
+          cat > /work/output/CERTIFICATION.txt <<'EOF'
+          Privora 4.0 RC2 / Privora Prism Environment 1.0
+          BIOS ISO-hybrid live boot: PASS
+          UEFI ISO-hybrid live boot: PASS
+          Disposable UEFI install/write: PASS
+          Installed-system boot marker: PASS
+          EOF
+          CONTAINER
 
-          1. Back up anything on the target USB; it will be erased.
-          2. Open Rufus.
-          3. Select the Privora RC2 ISO.
-          4. For a modern PC use GPT + UEFI.
-          5. Write the image and reboot.
-          6. Select the UEFI USB entry from your PC's boot menu.
-          7. Privora boots into the Prism installer-first environment.
+      - name: Add Windows USB instructions
+        shell: bash
+        run: |
+          cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'EOF'
+          Privora 4.0 RC2 — Privora Prism Environment 1.0
 
-          Back up your computer before installing. If Windows uses BitLocker,
-          keep your recovery key available before changing disk partitions.
-          TXT
-          ls -lh "$BUILDROOT/output"
-          df -h /
+          1. Verify the ISO against SHA256SUMS.txt.
+          2. Open Rufus on Windows.
+          3. Select Privora-4.0-rc2-Installer-privora-standard-amd64.iso.
+          4. For a modern PC, use GPT / UEFI.
+          5. Write the image to the USB drive; the selected USB is erased.
+          6. Boot the PC from the UEFI USB entry.
+          7. Choose Try Privora Live or Install Privora.
+          8. The default graphical session is Privora Prism Environment 1.0.
+          EOF
 
-      - name: Upload Privora RC2 ISO
-        uses: actions/upload-artifact@v4
+      - name: Upload certified Privora Prism ISO
+        uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC2-Installer-Plasma-Standard-amd64
+          name: Privora-4.0-RC2-Installer-Privora-Prism-1.0-Standard-amd64
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0
 
       - name: Stop build container
         if: always()
         shell: bash
-        run: docker rm -f privora-builder 2>/dev/null || true
+        run: docker rm -f privora-builder >/dev/null 2>&1 || true
