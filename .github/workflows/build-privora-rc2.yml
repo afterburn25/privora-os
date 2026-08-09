@@ -1,4 +1,4 @@
-name: Build Privora 4.0 RC3 — Reconstructed v29 — Boot-to-Login Recovery Certification
+name: Build Privora 4.0 RC4 — Unified System Experience v30 — Full Certification
 
 on:
   workflow_dispatch:
@@ -25,17 +25,17 @@ jobs:
           sudo apt-get clean || true
           df -h /
 
-      - name: Select exact reconstructed RC3 v29 source
+      - name: Select exact Privora RC4 Unified System Experience v30 source
         shell: bash
         run: |
           set -euxo pipefail
-          EXPECTED_SHA256='6e969193abf71c48a5c59ea4573f94659098f6d99a46b3f135393e7754011898'
-          EXPECTED_NAME='Privora-4.0-RC3-Reconstructed-v29-Web-Source.zip'
+          EXPECTED_SHA256='bcb4482cca02a7c92cd85531113e8f7fdb9ed9cb804009f002f2ef946448aa4d'
+          EXPECTED_NAME='Privora-4.0-RC4-Unified-System-Experience-v30-Web-Source.zip'
 
           SOURCE_ZIP=$(find . -maxdepth 3 -type f -name "$EXPECTED_NAME" -print -quit)
           if [ -z "$SOURCE_ZIP" ]; then
             echo "ERROR: $EXPECTED_NAME is not present in the repository." >&2
-            echo 'Upload the reconstructed v29 source ZIP beside this workflow; do not substitute RC2 or the lost v21 hash.' >&2
+            echo 'Upload the exact RC4 v30 source ZIP beside this workflow; do not substitute RC2/RC3 or the lost v21 hash.' >&2
             find . -maxdepth 3 -type f -printf '%p\n' | sort | head -n 400 >&2
             exit 28
           fi
@@ -56,22 +56,24 @@ jobs:
           mkdir -p "$BUILDROOT/src" "$BUILDROOT/output"
           unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
 
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc3'
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.1.0'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc4'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.2.0'
           test -f "$BUILDROOT/src/RECONSTRUCTION-PROVENANCE.md"
           test -f "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
-          grep -Fq 'reconstructed source baseline v29' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          grep -Fq 'RC4 Unified System Experience reconstructed source baseline v30' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
           test -f "$BUILDROOT/src/tests/systemd-context-safety-test.py"
           test -f "$BUILDROOT/src/tests/bios-graphical-boot-safety-test.py"
           test -f "$BUILDROOT/src/tests/rc3-consumer-experience-test.py"
+          test -f "$BUILDROOT/src/tests/rc4-unified-system-experience-test.py"
           test -f "$BUILDROOT/src/tests/boot-login-experience-test.py"
-          test -f "$BUILDROOT/src/release/RC3-BOOT-LOGIN-EXPERIENCE-HOTFIX-v29.md"
-          test -x "$BUILDROOT/src/ci/validate-rc3-reconstructed.sh"
+          test -f "$BUILDROOT/src/release/RC4-UNIFIED-SYSTEM-EXPERIENCE.md"
+          test -f "$BUILDROOT/src/release/RC4-UNIFIED-SYSTEM-EXPERIENCE-v30-VALIDATION.txt"
+          test -x "$BUILDROOT/src/ci/validate-rc4-unified.sh"
 
           chmod -R u+rwX "$BUILDROOT/src"
           find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
           echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
-          echo 'PASS: exact reconstructed RC3 v29 source selected'
+          echo 'PASS: exact Privora RC4 Unified System Experience v30 source selected'
 
       - name: Start Debian 13 build container
         shell: bash
@@ -110,19 +112,19 @@ jobs:
           done
           CONTAINER
 
-      - name: Validate reconstructed permanent source
+      - name: Validate RC4 Unified System Experience permanent source
         shell: bash
         run: |
           set -euxo pipefail
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
           cd /work/src
-          ./ci/validate-rc3-reconstructed.sh
+          ./ci/validate-rc4-unified.sh
           rm -rf release/.deb-work release/debs prism/.build prism/dist
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
           CONTAINER
 
-      - name: Build reconstructed Privora Prism installer ISO
+      - name: Build Privora RC4 Unified System Experience installer ISO
         shell: bash
         run: |
           set -euxo pipefail
@@ -130,27 +132,27 @@ jobs:
           set -euxo pipefail
           cd /work/src/distro
           DESKTOP=privora EDITION=standard INSTALLER=1 OFFLINE_REPO=1 PERSISTENCE=auto ./build.sh
-          ISO=$(find . -maxdepth 1 -type f -name 'Privora-4.0-rc3-Installer-privora-standard-amd64.iso' -print -quit)
+          ISO=$(find . -maxdepth 1 -type f -name 'Privora-4.0-rc4-Installer-privora-standard-amd64.iso' -print -quit)
           test -n "$ISO"
           test -s "$ISO"
           mv "$ISO" /work/output/
           if [ -f "$ISO.sha256" ]; then mv "$ISO.sha256" /work/output/; fi
           cd /work/output
-          sha256sum Privora-4.0-rc3-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
+          sha256sum Privora-4.0-rc4-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
           cp /work/src/RECONSTRUCTION-PROVENANCE.md .
-          cp /work/src/release/RC3-RECONSTRUCTED-v29-VALIDATION.txt .
+          cp /work/src/release/RC4-UNIFIED-SYSTEM-EXPERIENCE-v30-VALIDATION.txt .
           cd /work/src/distro
           lb clean --purge || true
           rm -rf chroot binary cache .build || true
           CONTAINER
 
-      - name: Verify finished ISO boot, chooser, login, branding, and provenance payload
+      - name: Verify finished RC4 ISO boot, login, unified experience, branding, and provenance
         shell: bash
         run: |
           set -euxo pipefail
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
-          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
+          ISO=/work/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso
           test -s "$ISO"
           for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
             xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
@@ -205,8 +207,11 @@ jobs:
           # tree. These are the exact fixes for the reported v28 login defects.
           xorriso -osirrox on -indev "$ISO" -extract /live/filesystem.squashfs "$check/filesystem.squashfs" >/dev/null 2>&1
           unsquashfs -cat "$check/filesystem.squashfs" etc/privora/reconstruction | tee "$check/reconstruction.txt"
-          grep -Fq 'reconstructed source baseline v29' "$check/reconstruction.txt"
-          grep -Fq 'boot-login-experience-hotfix=v29' "$check/reconstruction.txt"
+          grep -Fq 'RC4 Unified System Experience reconstructed source baseline v30' "$check/reconstruction.txt"
+          grep -Fq 'boot-login-experience-hotfix=v30' "$check/reconstruction.txt"
+          grep -Fq 'syslinux-staging-hotfix=v30' "$check/reconstruction.txt"
+          grep -Fq 'unified-system-experience=rc4' "$check/reconstruction.txt"
+          grep -Fq 'prism-environment=1.2.0' "$check/reconstruction.txt"
 
           unsquashfs -cat "$check/filesystem.squashfs" etc/sddm.conf.d/99-privora-live.conf > "$check/live-sddm.conf"
           grep -Fq 'User=privora' "$check/live-sddm.conf"
@@ -235,20 +240,35 @@ jobs:
           grep -Fq 'Before=display-manager.service sddm.service graphical.target' "$check/live-guard.service"
           ! grep -Fq 'ConditionPathExists=/run/live/medium' "$check/live-guard.service"
 
+          # RC4 Unified System Experience must be present in the actual Live filesystem.
+          unsquashfs -cat "$check/filesystem.squashfs" usr/lib/privora/privora_gui.py > "$check/privora_gui.py"
+          grep -Fq 'Privora 4.0 RC4 — Unified System Experience' "$check/privora_gui.py"
+          grep -Fq 'Privora Control Center' "$check/privora_gui.py"
+          grep -Fq 'Privora Software' "$check/privora_gui.py"
+          grep -Fq 'Privora Update' "$check/privora_gui.py"
+          grep -Fq 'Privora Recovery' "$check/privora_gui.py"
+          grep -Fq 'Finish Setup' "$check/privora_gui.py"
+          unsquashfs -cat "$check/filesystem.squashfs" usr/lib/privora/privora_platform.py > "$check/privora_platform.py"
+          grep -Fq 'def cmd_experience' "$check/privora_platform.py"
+          grep -Fq 'def cmd_update_status' "$check/privora_platform.py"
+          grep -Fq 'def cmd_software_installed' "$check/privora_platform.py"
+          unsquashfs -cat "$check/filesystem.squashfs" usr/share/applications/privora-system-experience.desktop > "$check/system-experience.desktop"
+          grep -Fq 'Name=Privora System Experience' "$check/system-experience.desktop"
+
           unsquashfs -cat "$check/filesystem.squashfs" usr/lib/os-release > "$check/os-release"
-          grep -Fq 'PRETTY_NAME="Privora 4.0 RC3"' "$check/os-release"
+          grep -Fq 'PRETTY_NAME="Privora 4.0 RC4"' "$check/os-release"
           ! grep -Fq 'Debian GNU/Linux' "$check/os-release"
 
           xorriso -indev "$ISO" -report_el_torito plain || true
           xorriso -indev "$ISO" -report_system_area plain || true
           rm -rf "$check"
-          echo 'PASS: finished ISO contains v29 boot chooser, login recovery, avatar, readable SDDM theme, and Privora identity'
+          echo 'PASS: finished ISO contains RC4 boot chooser, login recovery, Unified System Experience, avatar, readable SDDM theme, and Privora identity'
           CONTAINER
 
       - name: Upload ISO candidate before VM certification
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC3-Reconstructed-v29-ISO-Candidate-Uncertified
+          name: Privora-4.0-RC4-Unified-System-Experience-v30-ISO-Candidate-Uncertified
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 30
@@ -273,10 +293,10 @@ jobs:
           set -euxo pipefail
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
-          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
-          MON=/tmp/privora-v29-monitor.sock
-          PPM=/work/output/BIOS-BOOT-CENTER-v29.ppm
-          PNG=/work/output/BIOS-BOOT-CENTER-v29.png
+          ISO=/work/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso
+          MON=/tmp/privora-v30-monitor.sock
+          PPM=/work/output/BIOS-BOOT-CENTER-v30.ppm
+          PNG=/work/output/BIOS-BOOT-CENTER-v30.png
           rm -f "$MON" "$PPM" "$PNG"
 
           qemu-system-x86_64 \
@@ -285,7 +305,7 @@ jobs:
             -monitor "unix:$MON,server=on,wait=off" \
             -drive "if=none,id=privora_live,format=raw,readonly=on,file=$ISO" \
             -device "virtio-blk-pci,drive=privora_live,bootindex=1" \
-            >/tmp/privora-v29-qemu.out 2>/tmp/privora-v29-qemu.err &
+            >/tmp/privora-v30-qemu.out 2>/tmp/privora-v30-qemu.err &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f "$MON"' EXIT
 
@@ -316,8 +336,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC3-Reconstructed-v29-Boot-Center-Visual-Evidence
-          path: ${{ runner.temp }}/privora-build/output/BIOS-BOOT-CENTER-v29.png
+          name: Privora-4.0-RC4-v30-Boot-Center-Visual-Evidence
+          path: ${{ runner.temp }}/privora-build/output/BIOS-BOOT-CENTER-v30.png
           if-no-files-found: warn
           retention-days: 30
           compression-level: 6
@@ -329,15 +349,15 @@ jobs:
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
           cd /work/src
-          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
+          ISO=/work/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso
 
           QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
           QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
           QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
 
           cat > /work/output/CERTIFICATION.txt <<'EOF'
-          Privora 4.0 RC3 — Reconstructed v29
-          Privora Prism Environment 1.1
+          Privora 4.0 RC4 — Unified System Experience v30
+          Privora Prism Environment 1.2
 
           Reconstructed source identity: VERIFIED
           BIOS ISO-hybrid live boot: PASS
@@ -345,7 +365,7 @@ jobs:
           Disposable UEFI install/write: PASS
           Installed-system boot marker: PASS
 
-          This certifies the reconstructed v29 baseline, not the lost byte-identical v21 source archive.
+          This certifies the reconstructed RC4 v30 baseline, not the lost byte-identical RC3 v21 source archive.
           EOF
           CONTAINER
 
@@ -354,26 +374,28 @@ jobs:
         shell: bash
         run: |
           cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'EOF'
-          Privora 4.0 RC3 — Reconstructed v29 — Privora Prism 1.1
+          Privora 4.0 RC4 — Unified System Experience v30 — Privora Prism 1.2
 
           1. Verify the ISO against SHA256SUMS.txt.
           2. Open Rufus on Windows.
-          3. Select Privora-4.0-rc3-Installer-privora-standard-amd64.iso.
+          3. Select Privora-4.0-rc4-Installer-privora-standard-amd64.iso.
           4. For a modern PC, use GPT / UEFI.
           5. Write the image to the USB drive; the selected USB is erased.
           6. Boot from the UEFI USB entry.
           7. The Privora Boot Center remains visible for 30 seconds and offers Install, Try Live, Recovery & Repair, Terminal/Console, Safe Graphics, Accessibility and Persistence.
           8. Normal default: Try Privora Live.
           9. Live login normally autologs into Privora Prism. If the greeter is shown, use user `privora`, password `live`.
-          10. The v29 greeter uses larger controls and a Privora avatar.
-          11. The source provenance marker is retained under /etc/privora/reconstruction.
+          10. The RC4 greeter uses larger controls and a Privora avatar.
+          11. After login, Welcome guides Internet, Updates, Hardware, Appearance, Privacy and Recovery.
+          12. Privora Control Center is the unified entry point for Software, Updates, Backup, Recovery and system settings.
+          13. The source provenance marker is retained under /etc/privora/reconstruction.
           EOF
 
-      - name: Upload certified reconstructed RC3 ISO
+      - name: Upload certified Privora RC4 Unified System Experience ISO
         if: success()
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC3-Reconstructed-v29-Certified-Installer-Prism-1.1-amd64
+          name: Privora-4.0-RC4-Unified-System-Experience-v30-Certified-Installer-Prism-1.2-amd64
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 30
