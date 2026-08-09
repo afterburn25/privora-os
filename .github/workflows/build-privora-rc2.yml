@@ -1,241 +1,289 @@
-name: Privora 4.0 RC3 — Reuse v21 ISO — BIOS/UEFI Diagnostic Certification v24
+name: Build Privora 4.0 RC3 — Source Recovery & BIOS Certification Telemetry v25
 
 on:
   workflow_dispatch:
 
 permissions:
   contents: read
-  actions: read
 
 jobs:
-  certify-existing-iso:
+  installer-amd64:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
-    env:
-      CANDIDATE_ARTIFACT: Privora-4.0-RC3-v21-BIOS-Recovery-ISO-Candidate-Uncertified
-      ISO_NAME: Privora-4.0-rc3-Installer-privora-standard-amd64.iso
+    timeout-minutes: 180
 
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Locate newest v21 ISO candidate artifact
-        id: artifact
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euxo pipefail
-
-          API="/repos/${GITHUB_REPOSITORY}/actions/artifacts"
-          RESPONSE="$RUNNER_TEMP/privora-artifacts.json"
-          FALLBACK="$RUNNER_TEMP/privora-artifacts-all.json"
-
-          # IMPORTANT: gh api changes its default method to POST when -f/-F
-          # parameters are supplied. The Actions artifacts collection is a GET
-          # endpoint, so --method GET is mandatory here.
-          gh api --method GET \
-            -H "Accept: application/vnd.github+json" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "$API" \
-            -f "name=$CANDIDATE_ARTIFACT" \
-            -F "per_page=100" \
-            > "$RESPONSE"
-
-          # If the exact v21 label is absent, fetch the newest repository
-          # artifacts and let the selector look for the closest RC3 ISO
-          # candidate instead of failing without showing what is available.
-          exact_count=$(python3 - "$RESPONSE" <<'PY'
-          import json, sys
-          from pathlib import Path
-          data = json.loads(Path(sys.argv[1]).read_text())
-          print(len(data.get("artifacts", [])))
-          PY
-          )
-
-          if [ "$exact_count" -eq 0 ]; then
-            gh api --method GET \
-              -H "Accept: application/vnd.github+json" \
-              -H "X-GitHub-Api-Version: 2026-03-10" \
-              "$API" \
-              -F "per_page=100" \
-              > "$FALLBACK"
-          else
-            cp "$RESPONSE" "$FALLBACK"
-          fi
-
-          python3 - "$FALLBACK" "$CANDIDATE_ARTIFACT" "$GITHUB_OUTPUT" <<'PY'
-          import json, sys
-          from pathlib import Path
-
-          response, wanted, output = sys.argv[1:]
-          data = json.loads(Path(response).read_text())
-          artifacts = [a for a in data.get("artifacts", []) if not a.get("expired", False)]
-
-          exact = [a for a in artifacts if a.get("name") == wanted]
-
-          if exact:
-              candidates = exact
-              selection = "exact artifact-name match"
-          else:
-              def score(a):
-                  name = (a.get("name") or "").lower()
-                  points = 0
-                  if "privora-4.0-rc3" in name: points += 100
-                  if "v21" in name: points += 50
-                  if "iso" in name: points += 25
-                  if "candidate" in name: points += 20
-                  if "uncertified" in name: points += 10
-                  if "bios" in name: points += 5
-                  return points
-
-              candidates = [a for a in artifacts if score(a) >= 145]
-              selection = "fallback RC3/v21 ISO-candidate match"
-
-          if not candidates:
-              print(f"ERROR: no usable artifact matched {wanted!r}.", file=sys.stderr)
-              print("Newest non-expired artifacts visible to this workflow:", file=sys.stderr)
-              for a in sorted(
-                  artifacts,
-                  key=lambda x: (x.get("created_at", ""), int(x.get("id", 0))),
-                  reverse=True
-              )[:25]:
-                  print(
-                      f"  id={a.get('id')}  created={a.get('created_at')}  "
-                      f"name={a.get('name')!r}",
-                      file=sys.stderr
-                  )
-              raise SystemExit(4)
-
-          candidates.sort(key=lambda a: (a.get("created_at", ""), int(a.get("id", 0))))
-          a = candidates[-1]
-
-          print("Selected artifact via", selection)
-          print("  id:", a["id"])
-          print("  name:", a["name"])
-          print("  created_at:", a.get("created_at"))
-          print("  expires_at:", a.get("expires_at"))
-          print("  size_in_bytes:", a.get("size_in_bytes"))
-          print("  digest:", a.get("digest"))
-          print("  workflow_run:", (a.get("workflow_run") or {}).get("id"))
-
-          with open(output, "a", encoding="utf-8") as f:
-              f.write(f"artifact_id={a['id']}\n")
-              f.write(f"artifact_name={a.get('name','')}\n")
-              f.write(f"artifact_digest={a.get('digest','')}\n")
-              f.write(f"source_run_id={(a.get('workflow_run') or {}).get('id','')}\n")
-          PY
-
-      - name: Download and normalize v21 ISO candidate
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          ARTIFACT_ID: ${{ steps.artifact.outputs.artifact_id }}
-        run: |
-          set -euxo pipefail
-
-          BUILDROOT="$RUNNER_TEMP/privora-v23"
-          mkdir -p "$BUILDROOT/download" "$BUILDROOT/output" "$BUILDROOT/logs"
-          echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
-
-          ARCHIVE="$BUILDROOT/download/v21-candidate-artifact.zip"
-
-          curl -L --fail --retry 3 --retry-all-errors \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "X-GitHub-Api-Version: 2026-03-10" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/actions/artifacts/${ARTIFACT_ID}/zip" \
-            -o "$ARCHIVE"
-
-          unzip -t "$ARCHIVE"
-          mkdir -p "$BUILDROOT/download/unpacked"
-          unzip -q "$ARCHIVE" -d "$BUILDROOT/download/unpacked"
-
-          echo 'Downloaded artifact contents:'
-          find "$BUILDROOT/download/unpacked" -maxdepth 4 -type f -printf '%s %p\n' | sort
-
-          ISO=$(find "$BUILDROOT/download/unpacked" -type f -name "$ISO_NAME" -print -quit)
-          if [ -z "$ISO" ]; then
-            ISO=$(find "$BUILDROOT/download/unpacked" -type f -iname '*.iso' -print -quit)
-          fi
-
-          if [ -z "$ISO" ] || [ ! -s "$ISO" ]; then
-            echo "ERROR: downloaded artifact does not contain a non-empty ISO." >&2
-            exit 3
-          fi
-
-          cp "$ISO" "$BUILDROOT/output/$ISO_NAME"
-          sha256sum "$BUILDROOT/output/$ISO_NAME" | tee "$BUILDROOT/output/REUSED-ISO-SHA256.txt"
-          echo "ISO=$BUILDROOT/output/$ISO_NAME" >> "$GITHUB_ENV"
-
-      - name: Install QEMU and ISO inspection tools
+      - name: Reclaim runner disk space
         shell: bash
         run: |
           set -euxo pipefail
-          sudo apt-get update
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            qemu-system-x86 qemu-utils ovmf xorriso unzip
-          sudo apt-get clean
+          echo 'Disk before cleanup:'
+          df -h /
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL || true
+          sudo docker system prune -af --volumes || true
+          sudo apt-get clean || true
+          echo 'Disk after cleanup:'
           df -h /
 
-      - name: Inspect reused ISO before boot
+      - name: Recover and verify RC3 v21 source
         shell: bash
         run: |
           set -euxo pipefail
 
-          test -s "$ISO"
+          EXPECTED_SHA256='79589a6f107cbcb1af753c973ea0bb89fc808cd45db4335ce92933f559b173b2'
+          BUILDROOT="$RUNNER_TEMP/privora-build"
+          rm -rf "$BUILDROOT"
+          mkdir -p "$BUILDROOT/src" "$BUILDROOT/output"
 
-          xorriso -indev "$ISO" -ls /live | tee "$BUILDROOT/logs/iso-live-tree.txt"
-          xorriso -indev "$ISO" -report_el_torito plain \
-            | tee "$BUILDROOT/logs/iso-el-torito.txt" || true
-          xorriso -indev "$ISO" -report_system_area plain \
-            | tee "$BUILDROOT/logs/iso-system-area.txt" || true
+          SOURCE_ZIP=''
+          SOURCE_ROOT=''
 
-          for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
-            xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
-          done
+          # Path A: canonical or contract-equivalent RC3 source ZIP.
+          mapfile -t CANDIDATES < <(find . -maxdepth 4 -type f \
+            \( -iname 'Privora-4.0-RC3-Web-Source*.zip' -o -iname '*Privora*RC3*Source*.zip' \) \
+            -print | sort)
 
-          for path in \
-            /isolinux/isolinux.bin \
-            /isolinux/vesamenu.c32 \
-            /isolinux/ldlinux.c32 \
-            /isolinux/libcom32.c32 \
-            /isolinux/libutil.c32; do
-            xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
-          done
+          if [ "${#CANDIDATES[@]}" -gt 0 ]; then
+            echo 'RC3 source ZIP candidates:'
+            for candidate in "${CANDIDATES[@]}"; do
+              sha256sum "$candidate"
+            done
 
-          mkdir -p "$BUILDROOT/logs/iso-files"
-          xorriso -osirrox on -indev "$ISO" \
-            -extract /isolinux/isolinux.cfg "$BUILDROOT/logs/iso-files/isolinux.cfg" \
-            >/dev/null 2>&1
-          cat "$BUILDROOT/logs/iso-files/isolinux.cfg"
+            for candidate in "${CANDIDATES[@]}"; do
+              actual=$(sha256sum "$candidate" | awk '{print $1}')
+              if [ "$actual" = "$EXPECTED_SHA256" ]; then
+                SOURCE_ZIP="$candidate"
+                break
+              fi
+            done
 
-      - name: Create standalone v23 QEMU diagnostic harness
+            if [ -z "$SOURCE_ZIP" ]; then
+              for candidate in "${CANDIDATES[@]}"; do
+                listing=$(unzip -Z1 "$candidate" 2>/dev/null || true)
+                if grep -Eq '(^|/)tests/systemd-context-safety-test\.py$' <<<"$listing" \
+                   && grep -Eq '(^|/)release/RC3-SYSTEMD-CONTEXT-HOTFIX-v18\.md$' <<<"$listing" \
+                   && grep -Eq '(^|/)tests/bios-graphical-boot-safety-test\.py$' <<<"$listing" \
+                   && grep -Eq '(^|/)release/RC3-BIOS-GRAPHICAL-BOOT-HOTFIX-v21\.md$' <<<"$listing"; then
+                  SOURCE_ZIP="$candidate"
+                  break
+                fi
+              done
+            fi
+          fi
+
+          if [ -n "$SOURCE_ZIP" ]; then
+            SOURCE_ZIP=$(realpath "$SOURCE_ZIP")
+            echo "SOURCE MODE: verified ZIP"
+            echo "Using source archive: $SOURCE_ZIP"
+            sha256sum "$SOURCE_ZIP"
+            unzip -t "$SOURCE_ZIP" >/dev/null
+            unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
+
+            if [ ! -f "$BUILDROOT/src/VERSION" ]; then
+              VERSION_FILE=$(find "$BUILDROOT/src" -mindepth 2 -maxdepth 4 -type f -name VERSION -print -quit)
+              [ -n "$VERSION_FILE" ] || {
+                echo 'ERROR: VERSION file missing from RC3 source ZIP.' >&2
+                exit 10
+              }
+              SOURCE_ROOT=$(dirname "$VERSION_FILE")
+              mkdir -p "$BUILDROOT/flat"
+              cp -a "$SOURCE_ROOT"/. "$BUILDROOT/flat"/
+              rm -rf "$BUILDROOT/src"
+              mv "$BUILDROOT/flat" "$BUILDROOT/src"
+            fi
+          else
+            # Path B: RC3 source committed unpacked in the repository.
+            # Search for an actual source root rather than assuming repository root.
+            echo 'No RC3 source ZIP found; searching checked-out repository for an unpacked RC3 source tree.'
+
+            mapfile -t VERSION_FILES < <(
+              find . -maxdepth 5 -type f -name VERSION \
+                -not -path './.git/*' \
+                -print | sort
+            )
+
+            for vf in "${VERSION_FILES[@]}"; do
+              candidate_root=$(dirname "$vf")
+
+              [ "$(tr -d '\r\n' < "$vf")" = '4.0-rc3' ] || continue
+              [ -f "$candidate_root/prism/VERSION" ] || continue
+              [ "$(tr -d '\r\n' < "$candidate_root/prism/VERSION")" = '1.1.0' ] || continue
+              [ -f "$candidate_root/tests/systemd-context-safety-test.py" ] || continue
+              [ -f "$candidate_root/release/RC3-SYSTEMD-CONTEXT-HOTFIX-v18.md" ] || continue
+              [ -f "$candidate_root/tests/bios-graphical-boot-safety-test.py" ] || continue
+              [ -f "$candidate_root/release/RC3-BIOS-GRAPHICAL-BOOT-HOTFIX-v21.md" ] || continue
+              [ -f "$candidate_root/distro/build.sh" ] || continue
+
+              SOURCE_ROOT=$(realpath "$candidate_root")
+              break
+            done
+
+            if [ -z "$SOURCE_ROOT" ]; then
+              echo 'ERROR: RC3 source is genuinely absent from this checkout.' >&2
+              echo 'Neither a v21 RC3 source ZIP nor an unpacked v21-compatible RC3 source tree was found.' >&2
+              echo 'The Actions artifact inventory also contains no RC3 ISO candidate; do NOT substitute an RC2 artifact.' >&2
+              echo "Required canonical source archive: Privora-4.0-RC3-Web-Source.zip" >&2
+              echo "Expected v21 SHA-256: $EXPECTED_SHA256" >&2
+              echo 'Top-level checkout inventory:' >&2
+              find . -maxdepth 3 -type f \
+                -not -path './.git/*' \
+                -printf '%p\n' | sort | head -n 400 >&2
+              exit 12
+            fi
+
+            echo "SOURCE MODE: unpacked repository tree"
+            echo "Using RC3 source root: $SOURCE_ROOT"
+
+            # Preserve all project payload, including any nested package archives,
+            # but do not copy Git metadata into the build workspace.
+            tar -C "$SOURCE_ROOT" --exclude='.git' -cf - . \
+              | tar -C "$BUILDROOT/src" -xf -
+          fi
+
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc3'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.1.0'
+          test -f "$BUILDROOT/src/tests/systemd-context-safety-test.py"
+          test -f "$BUILDROOT/src/release/RC3-SYSTEMD-CONTEXT-HOTFIX-v18.md"
+          test -f "$BUILDROOT/src/tests/bios-graphical-boot-safety-test.py"
+          test -f "$BUILDROOT/src/release/RC3-BIOS-GRAPHICAL-BOOT-HOTFIX-v21.md"
+          test -f "$BUILDROOT/src/distro/build.sh"
+
+          chmod -R u+rwX "$BUILDROOT/src"
+          find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
+
+          echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
+          echo 'PASS: recovered RC3 source contains v18 systemd-context and v21 BIOS graphical-boot contracts'
+          df -h /
+
+      - name: Start Debian 13 build container
         shell: bash
         run: |
           set -euxo pipefail
-          mkdir -p "$BUILDROOT/tools"
+          docker pull debian:13
+          docker run -d --name privora-builder --privileged \
+            -v "$BUILDROOT:/work" \
+            debian:13 sleep infinity
+          docker exec privora-builder bash -lc 'cat /etc/debian_version; df -h / /work'
 
-          cat > "$BUILDROOT/tools/qemu-live-diagnostic.sh" <<'SMOKE'
+      - name: Configure Debian 13 build environment
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cat > /etc/apt/sources.list.d/debian.sources <<'SOURCES'
+          Types: deb
+          URIs: http://deb.debian.org/debian
+          Suites: trixie trixie-updates
+          Components: main contrib non-free non-free-firmware
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+
+          Types: deb
+          URIs: http://deb.debian.org/debian-security
+          Suites: trixie-security
+          Components: main contrib non-free non-free-firmware
+          Architectures: amd64
+          Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg
+          SOURCES
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            ca-certificates git unzip xz-utils live-build debootstrap squashfs-tools xorriso \
+            syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
+            dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
+            dpkg-dev python3 gzip coreutils gcc binutils file
+          for tool in gcc ld readelf nm file dpkg-deb dpkg-scanpackages xorriso lb; do
+            command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 127; }
+          done
+          apt-get clean
+          rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+          CONTAINER
+
+      - name: Validate permanent source tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+          ./tools/render-boot-menus.py
+          ./prism/tools/audit.sh
+          python3 tests/prism-environment-test.py
+          python3 tests/rc3-consumer-experience-test.py
+          python3 tests/systemd-context-safety-test.py
+          python3 tests/bios-graphical-boot-safety-test.py
+          python3 tests/source-of-truth-regression-test.py
+          python3 tests/live-build-static-test.py
+          python3 tests/grub-live-package-test.py
+          python3 tests/branding-static-test.py
+          python3 tests/boot-marker-static-test.py
+          python3 installer/tests/first-party-installer-static-test.py
+          python3 installer/tests/safety-test.py
+          python3 installer/tests/recommendation-test.py
+          python3 tools/build-first-party-debs.py
+          python3 tools/check-deb-collisions.py
+          rm -rf prism/.build release/.deb-work
+          CONTAINER
+
+      - name: Apply v25 QEMU certification telemetry contract
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+
+          cat > ci/qemu-live-smoke.sh <<'SMOKE'
           #!/usr/bin/env bash
           set -euo pipefail
 
-          [[ $# -eq 3 ]] || {
-            echo "Usage: $0 ISO bios|uefi LOG_ROOT" >&2
-            exit 2
-          }
-
+          [[ $# -ge 1 ]] || { echo "Usage: $0 ISO [bios|uefi]" >&2; exit 2; }
           iso=$(readlink -f "$1")
-          mode=$2
-          log_root=$(readlink -m "$3")
+          mode=${2:-bios}
           timeout_s=${QEMU_TIMEOUT:-600}
 
-          [[ -s $iso ]] || { echo "ISO missing: $iso" >&2; exit 2; }
-          [[ $mode == bios || $mode == uefi ]] || { echo "mode must be bios or uefi" >&2; exit 2; }
+          [[ -f $iso ]] || { echo "ISO not found: $iso" >&2; exit 2; }
+          for t in qemu-system-x86_64 xorriso; do
+            command -v "$t" >/dev/null || { echo "$t required" >&2; exit 127; }
+          done
+          [[ $mode == bios || $mode == uefi ]] || { echo 'mode must be bios or uefi' >&2; exit 2; }
 
-          mkdir -p "$log_root"
+          work=$(mktemp -d)
           pid=''
+          trap '[[ -z ${pid:-} ]] || kill "$pid" 2>/dev/null || true; rm -rf "$work"' EXIT
+
+          echo "Inspecting ISO live payload before boot..."
+          xorriso -indev "$iso" -ls /live 2>&1 | tee "$work/live-tree.txt"
+          for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
+            xorriso -indev "$iso" -find "$path" -type f -- 2>/dev/null | grep -Fq "$path" || {
+              echo "Required live payload missing from ISO: $path" >&2
+              exit 8
+            }
+          done
+
+          if [[ $mode == bios ]]; then
+            for path in \
+              /isolinux/isolinux.bin \
+              /isolinux/vesamenu.c32 \
+              /isolinux/ldlinux.c32 \
+              /isolinux/libcom32.c32 \
+              /isolinux/libutil.c32; do
+              xorriso -indev "$iso" -find "$path" -type f -- 2>/dev/null | grep -Fq "$path" || {
+                echo "Required BIOS boot payload missing from ISO: $path" >&2
+                exit 9
+              }
+            done
+
+            xorriso -osirrox on -indev "$iso" \
+              -extract /isolinux/isolinux.cfg "$work/isolinux.cfg" >/dev/null 2>&1 || true
+            if [[ -s $work/isolinux.cfg ]]; then
+              echo '--- ISO isolinux.cfg ---'
+              cat "$work/isolinux.cfg"
+              echo '--- end isolinux.cfg ---'
+            fi
+          fi
 
           stop_vm() {
             local victim=${1:-}
@@ -253,344 +301,361 @@ jobs:
             local serial_log=$2
             local marker=$3
             local seconds=$4
-            local deadline=$((SECONDS + seconds))
+            local deadline=$((SECONDS+seconds))
             LAST_QEMU_RC=0
 
             while (( SECONDS < deadline )); do
-              if grep -q "$marker" "$serial_log" 2>/dev/null; then
+              if grep -q "$marker" "$serial_log"; then
                 grep "$marker" "$serial_log" | tail -n1
                 return 0
               fi
 
               if ! kill -0 "$victim" 2>/dev/null; then
-                set +e
-                wait "$victim"
-                LAST_QEMU_RC=$?
-                set -e
+                if wait "$victim"; then
+                  LAST_QEMU_RC=0
+                else
+                  LAST_QEMU_RC=$?
+                fi
                 pid=''
                 return 10
               fi
-
               sleep 2
             done
-
             return 11
           }
 
-          run_primary() {
-            local serial="$log_root/primary-serial.log"
-            local stderr="$log_root/primary-qemu.stderr"
-            local debug="$log_root/primary-qemu-debug.log"
-            : > "$serial"; : > "$stderr"; : > "$debug"
+          log="$work/serial.log"
+          qerr="$work/qemu.stderr"
+          qdebug="$work/qemu-debug.log"
+          : > "$log"
+          : > "$qerr"
+          : > "$qdebug"
 
-            local -a args=(
-              -machine q35,accel=tcg
-              -m 3072
-              -smp 2
-              -cpu max
-              -vga std
-              -display none
-              -serial "file:$serial"
-              -monitor none
-              -no-reboot
-              -net none
-              -d guest_errors,cpu_reset
-              -D "$debug"
-              -drive "if=none,id=privora_live,format=raw,readonly=on,file=$iso"
-              -device "virtio-blk-pci,drive=privora_live,bootindex=1"
+          args=(
+            -machine q35,accel=tcg
+            -m 3072
+            -smp 2
+            -cpu max
+            -vga std
+            -display none
+            -serial "file:$log"
+            -monitor none
+            -no-reboot
+            -net none
+            -d guest_errors,cpu_reset
+            -D "$qdebug"
+            -drive "if=none,id=privora_live,format=raw,readonly=on,file=$iso"
+            -device "virtio-blk-pci,drive=privora_live,bootindex=1"
+          )
+
+          if [[ $mode == uefi ]]; then
+            fw=${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}
+            vars=${OVMF_VARS:-/usr/share/OVMF/OVMF_VARS_4M.fd}
+            [[ -r $fw && -r $vars ]] || { echo 'OVMF firmware missing' >&2; exit 127; }
+            cp "$vars" "$work/vars.fd"
+            args+=(
+              -drive "if=pflash,format=raw,readonly=on,file=$fw"
+              -drive "if=pflash,format=raw,file=$work/vars.fd"
             )
+          fi
 
-            if [[ $mode == uefi ]]; then
-              local fw=''
-              local vars=''
+          echo "Starting real $mode ISO-hybrid disk boot smoke test..."
+          qemu-system-x86_64 "${args[@]}" >"$work/qemu.stdout" 2>"$qerr" &
+          pid=$!
 
-              for candidate in \
-                /usr/share/OVMF/OVMF_CODE_4M.fd \
-                /usr/share/OVMF/OVMF_CODE.fd; do
-                if [[ -r $candidate ]]; then fw=$candidate; break; fi
-              done
+          set +e
+          wait_for_marker "$pid" "$log" 'PRIVORA_LIVE_BOOT_OK' "$timeout_s"
+          primary_result=$?
+          set -e
 
-              for candidate in \
-                /usr/share/OVMF/OVMF_VARS_4M.fd \
-                /usr/share/OVMF/OVMF_VARS.fd; do
-                if [[ -r $candidate ]]; then vars=$candidate; break; fi
-              done
+          if [[ $primary_result -eq 0 ]]; then
+            stop_vm "$pid"
+            echo "QEMU $mode ISO-hybrid boot: PASS"
+            exit 0
+          fi
 
-              [[ -n $fw && -n $vars ]] || {
-                echo "OVMF firmware not found" >&2
-                return 127
-              }
+          if [[ $primary_result -eq 10 ]]; then
+            echo "QEMU exited before boot marker ($mode); qemu_rc=$LAST_QEMU_RC" >&2
+          else
+            echo "Timed out waiting for PRIVORA_LIVE_BOOT_OK ($mode)" >&2
+            stop_vm "$pid"
+          fi
 
-              cp "$vars" "$log_root/vars.fd"
-              args+=(
-                -drive "if=pflash,format=raw,readonly=on,file=$fw"
-                -drive "if=pflash,format=raw,file=$log_root/vars.fd"
-              )
-            fi
+          echo '--- primary serial tail ---' >&2
+          tail -n 320 "$log" >&2 || true
+          echo '--- primary qemu stderr tail ---' >&2
+          tail -n 180 "$qerr" >&2 || true
+          echo '--- primary qemu reset/guest-error tail ---' >&2
+          tail -n 220 "$qdebug" >&2 || true
 
-            echo "Starting real $mode ISO-hybrid raw-disk boot..."
-            qemu-system-x86_64 "${args[@]}" \
-              >"$log_root/primary-qemu.stdout" 2>"$stderr" &
-            pid=$!
+          # BIOS-only optical-media diagnostic. This separates an isohybrid
+          # raw-disk/MBR problem from an ISOLINUX/menu problem shared by both paths.
+          if [[ $mode == bios ]]; then
+            optical_log="$work/optical-serial.log"
+            optical_err="$work/optical-qemu.stderr"
+            optical_debug="$work/optical-qemu-debug.log"
+            : > "$optical_log"
+            : > "$optical_err"
+            : > "$optical_debug"
 
-            set +e
-            wait_for_marker "$pid" "$serial" 'PRIVORA_LIVE_BOOT_OK' "$timeout_s"
-            local result=$?
-            set -e
-
-            if [[ $result -eq 0 ]]; then
-              stop_vm "$pid"
-              echo "PRIMARY_${mode^^}=PASS"
-              return 0
-            fi
-
-            if [[ $result -eq 10 ]]; then
-              echo "Primary $mode QEMU exited before marker; qemu_rc=$LAST_QEMU_RC" >&2
-            else
-              echo "Primary $mode timed out waiting for PRIVORA_LIVE_BOOT_OK" >&2
-              stop_vm "$pid"
-            fi
-
-            echo '--- primary serial tail ---' >&2
-            tail -n 320 "$serial" >&2 || true
-            echo '--- primary qemu stderr tail ---' >&2
-            tail -n 180 "$stderr" >&2 || true
-            echo '--- primary qemu reset/guest-error tail ---' >&2
-            tail -n 220 "$debug" >&2 || true
-            return 1
-          }
-
-          run_bios_optical_probe() {
-            local serial="$log_root/optical-serial.log"
-            local stderr="$log_root/optical-qemu.stderr"
-            local debug="$log_root/optical-qemu-debug.log"
-            : > "$serial"; : > "$stderr"; : > "$debug"
-
-            echo 'Running BIOS El Torito optical-media probe...' >&2
+            echo 'Running BIOS El Torito optical-media diagnostic probe...' >&2
             qemu-system-x86_64 \
-              -machine q35,accel=tcg \
-              -m 3072 -smp 2 -cpu max \
+              -machine q35,accel=tcg -m 3072 -smp 2 -cpu max \
               -vga std -display none \
-              -serial "file:$serial" \
-              -monitor none -no-reboot -net none \
-              -d guest_errors,cpu_reset \
-              -D "$debug" \
-              -boot order=d,menu=off \
-              -cdrom "$iso" \
-              >"$log_root/optical-qemu.stdout" 2>"$stderr" &
+              -serial "file:$optical_log" -monitor none -no-reboot -net none \
+              -d guest_errors,cpu_reset -D "$optical_debug" \
+              -boot order=d,menu=off -cdrom "$iso" \
+              >"$work/optical.stdout" 2>"$optical_err" &
             pid=$!
 
-            local optical_timeout=$timeout_s
+            optical_timeout=$timeout_s
             (( optical_timeout > 360 )) && optical_timeout=360
 
             set +e
-            wait_for_marker "$pid" "$serial" 'PRIVORA_LIVE_BOOT_OK' "$optical_timeout"
-            local result=$?
+            wait_for_marker "$pid" "$optical_log" 'PRIVORA_LIVE_BOOT_OK' "$optical_timeout"
+            optical_result=$?
             set -e
 
-            if [[ $result -eq 0 ]]; then
+            if [[ $optical_result -eq 0 ]]; then
               stop_vm "$pid"
-              echo 'BIOS_OPTICAL=PASS'
-              return 0
+              echo 'DIAGNOSTIC: El Torito BIOS boot passes but ISO-hybrid raw-disk boot fails.' >&2
+              echo 'DIAGNOSTIC: failure is isolated to the BIOS isohybrid disk/MBR path.' >&2
+              exit 5
             fi
 
-            if [[ $result -eq 10 ]]; then
+            if [[ $optical_result -eq 10 ]]; then
               echo "Optical BIOS QEMU exited before marker; qemu_rc=$LAST_QEMU_RC" >&2
             else
               echo 'Optical BIOS probe timed out.' >&2
               stop_vm "$pid"
             fi
-
             echo '--- optical serial tail ---' >&2
-            tail -n 260 "$serial" >&2 || true
+            tail -n 260 "$optical_log" >&2 || true
             echo '--- optical qemu stderr tail ---' >&2
-            tail -n 140 "$stderr" >&2 || true
+            tail -n 140 "$optical_err" >&2 || true
             echo '--- optical qemu reset/guest-error tail ---' >&2
-            tail -n 180 "$debug" >&2 || true
-            return 1
-          }
+            tail -n 180 "$optical_debug" >&2 || true
+          fi
 
-          run_direct_kernel_probe() {
-            local direct="$log_root/direct"
-            mkdir -p "$direct"
+          # Always run the direct-kernel diagnostic after any primary-media
+          # failure, including an early QEMU exit. Keep the same ISO attached
+          # and explicitly identify it to live-boot.
+          mkdir -p "$work/direct"
+          if xorriso -osirrox on -indev "$iso" \
+               -extract /live/vmlinuz "$work/direct/vmlinuz" >/dev/null 2>&1 \
+             && xorriso -osirrox on -indev "$iso" \
+               -extract /live/initrd.img "$work/direct/initrd.img" >/dev/null 2>&1; then
 
-            xorriso -osirrox on -indev "$iso" \
-              -extract /live/vmlinuz "$direct/vmlinuz" >/dev/null 2>&1
-            xorriso -osirrox on -indev "$iso" \
-              -extract /live/initrd.img "$direct/initrd.img" >/dev/null 2>&1
+            dlog="$work/direct-serial.log"
+            derr="$work/direct-qemu.stderr"
+            ddebug="$work/direct-qemu-debug.log"
+            : > "$dlog"
+            : > "$derr"
+            : > "$ddebug"
 
-            local serial="$log_root/direct-serial.log"
-            local stderr="$log_root/direct-qemu.stderr"
-            local debug="$log_root/direct-qemu-debug.log"
-            : > "$serial"; : > "$stderr"; : > "$debug"
-
-            echo 'Running direct-kernel + same-hybrid-media probe...' >&2
+            echo 'Running direct-kernel hybrid-media diagnostic probe...' >&2
             qemu-system-x86_64 \
-              -machine q35,accel=tcg \
-              -m 3072 -smp 2 -cpu max \
+              -machine q35,accel=tcg -m 3072 -smp 2 -cpu max \
               -vga std -display none \
-              -serial "file:$serial" \
-              -monitor none -no-reboot -net none \
-              -d guest_errors,cpu_reset \
-              -D "$debug" \
+              -serial "file:$dlog" -monitor none -no-reboot -net none \
+              -d guest_errors,cpu_reset -D "$ddebug" \
               -drive "if=none,id=privora_live,format=raw,readonly=on,file=$iso" \
               -device "virtio-blk-pci,drive=privora_live" \
-              -kernel "$direct/vmlinuz" \
-              -initrd "$direct/initrd.img" \
+              -kernel "$work/direct/vmlinuz" \
+              -initrd "$work/direct/initrd.img" \
               -append "boot=live components live-media=/dev/vda live-media-timeout=30 debug=1 console=tty0 console=ttyS0,115200 systemd.unit=multi-user.target" \
-              >"$log_root/direct-qemu.stdout" 2>"$stderr" &
+              >"$work/direct.stdout" 2>"$derr" &
             pid=$!
 
             set +e
-            wait_for_marker "$pid" "$serial" 'PRIVORA_LIVE_BOOT_OK' 360
-            local result=$?
+            wait_for_marker "$pid" "$dlog" 'PRIVORA_LIVE_BOOT_OK' 360
+            direct_result=$?
             set -e
 
-            if [[ $result -eq 0 ]]; then
+            if [[ $direct_result -eq 0 ]]; then
               stop_vm "$pid"
-              echo 'DIRECT_KERNEL=PASS'
-              return 0
+              echo "DIAGNOSTIC: live kernel/userspace and hybrid medium are good; $mode bootloader/media-launch path is the remaining failure." >&2
+              exit 5
             fi
 
-            if [[ $result -eq 10 ]]; then
+            if [[ $direct_result -eq 10 ]]; then
               echo "Direct-kernel QEMU exited before marker; qemu_rc=$LAST_QEMU_RC" >&2
             else
-              echo 'Direct-kernel probe timed out.' >&2
+              echo 'Direct-kernel diagnostic timed out.' >&2
               stop_vm "$pid"
             fi
 
             echo '--- direct-kernel serial tail ---' >&2
-            tail -n 340 "$serial" >&2 || true
+            tail -n 340 "$dlog" >&2 || true
             echo '--- direct-kernel qemu stderr tail ---' >&2
-            tail -n 160 "$stderr" >&2 || true
+            tail -n 160 "$derr" >&2 || true
             echo '--- direct-kernel qemu reset/guest-error tail ---' >&2
-            tail -n 200 "$debug" >&2 || true
-            return 1
-          }
-
-          if run_primary; then
-            exit 0
+            tail -n 200 "$ddebug" >&2 || true
           fi
 
-          optical_rc=99
-          if [[ $mode == bios ]]; then
-            set +e
-            run_bios_optical_probe
-            optical_rc=$?
-            set -e
-          fi
-
-          set +e
-          run_direct_kernel_probe
-          direct_rc=$?
-          set -e
-
-          if [[ $mode == bios && $optical_rc -eq 0 ]]; then
-            echo 'DIAGNOSTIC: BIOS El Torito optical boot passes while raw ISO-hybrid disk boot fails.' >&2
-            echo 'DIAGNOSTIC: remaining fault is isolated to the BIOS isohybrid/raw-disk launch path.' >&2
-            exit 5
-          fi
-
-          if [[ $direct_rc -eq 0 ]]; then
-            echo "DIAGNOSTIC: live kernel/userspace and the reused medium are good; $mode firmware/bootloader/media-launch path remains." >&2
-            exit 5
-          fi
-
-          echo "DIAGNOSTIC: direct-kernel/live-userspace probe also failed after $mode primary failure." >&2
+          echo "DIAGNOSTIC: direct-kernel/live-userspace path also failed after $mode media boot failure." >&2
           exit 6
           SMOKE
 
-          chmod +x "$BUILDROOT/tools/qemu-live-diagnostic.sh"
-          bash -n "$BUILDROOT/tools/qemu-live-diagnostic.sh"
+          chmod +x ci/qemu-live-smoke.sh
+          bash -n ci/qemu-live-smoke.sh
 
-      - name: Run BIOS and UEFI diagnostics on reused v21 ISO
-        id: diag
-        shell: bash
-        run: |
-          set -uxo pipefail
+          # Regression assertion for the exact v21 telemetry defect:
+          # the early-QEMU-exit path must return to the common diagnostics,
+          # not terminate immediately with exit 4.
+          python3 - <<'PY'
+          from pathlib import Path
+          s = Path('ci/qemu-live-smoke.sh').read_text()
+          assert 'exit 4' not in s
+          assert 'Running direct-kernel hybrid-media diagnostic probe' in s
+          assert 'Running BIOS El Torito optical-media diagnostic probe' in s
+          assert '-d guest_errors,cpu_reset' in s
+          assert 'qemu_rc=$LAST_QEMU_RC' in s
+          print('PASS: v25 early-exit telemetry and fallback diagnostic contract')
+          PY
+          CONTAINER
 
-          mkdir -p "$BUILDROOT/logs/bios" "$BUILDROOT/logs/uefi"
-
-          set +e
-          QEMU_TIMEOUT=600 "$BUILDROOT/tools/qemu-live-diagnostic.sh" \
-            "$ISO" bios "$BUILDROOT/logs/bios" \
-            2>&1 | tee "$BUILDROOT/logs/BIOS-CONSOLE.txt"
-          BIOS_RC=${PIPESTATUS[0]}
-
-          QEMU_TIMEOUT=600 "$BUILDROOT/tools/qemu-live-diagnostic.sh" \
-            "$ISO" uefi "$BUILDROOT/logs/uefi" \
-            2>&1 | tee "$BUILDROOT/logs/UEFI-CONSOLE.txt"
-          UEFI_RC=${PIPESTATUS[0]}
-          set -e
-
-          {
-            echo "Privora 4.0 RC3 v24 reused-v21-ISO diagnostic result"
-            echo "source artifact: $CANDIDATE_ARTIFACT"
-            echo "source artifact id: ${{ steps.artifact.outputs.artifact_id }}"
-            echo "source workflow run: ${{ steps.artifact.outputs.source_run_id }}"
-            echo "BIOS_RC=$BIOS_RC"
-            echo "UEFI_RC=$UEFI_RC"
-            echo
-            echo "Return codes:"
-            echo "  0 = real ISO-hybrid path reached PRIVORA_LIVE_BOOT_OK"
-            echo "  5 = diagnostic probe isolated the failure below the requested primary path"
-            echo "  6 = direct-kernel/live-userspace probe also failed"
-          } | tee "$BUILDROOT/logs/V23-SUMMARY.txt"
-
-          echo "bios_rc=$BIOS_RC" >> "$GITHUB_OUTPUT"
-          echo "uefi_rc=$UEFI_RC" >> "$GITHUB_OUTPUT"
-
-          # This workflow is a diagnostic/certification continuation, not a way
-          # to convert a diagnostic-only success into release certification.
-          if [ "$BIOS_RC" -ne 0 ] || [ "$UEFI_RC" -ne 0 ]; then
-            exit 20
-          fi
-
-      - name: Write live-boot certification continuation record
-        if: success()
+      - name: Build Privora Prism installer ISO
         shell: bash
         run: |
           set -euxo pipefail
-          cat > "$BUILDROOT/output/LIVE-BOOT-CERTIFICATION-v24.txt" <<EOF
-          Privora 4.0 RC3 — v24 reused-v21-ISO certification continuation
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src/distro
+          DESKTOP=privora EDITION=standard INSTALLER=1 OFFLINE_REPO=1 PERSISTENCE=auto ./build.sh
+          ISO=$(find . -maxdepth 1 -type f -name 'Privora-4.0-rc3-Installer-privora-standard-amd64.iso' -print -quit)
+          test -n "$ISO"
+          test -s "$ISO"
+          mv "$ISO" /work/output/
+          if [ -f "$ISO.sha256" ]; then mv "$ISO.sha256" /work/output/; fi
+          cd /work/output
+          sha256sum Privora-4.0-rc3-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
+          cd /work/src/distro
+          lb clean --purge || true
+          rm -rf chroot binary cache .build || true
+          df -h / /work
+          CONTAINER
 
-          Source GitHub Actions artifact:
-            $CANDIDATE_ARTIFACT
+      - name: Verify finished ISO identity and boot payload
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
+          test -s "$ISO"
+          xorriso -indev "$ISO" -ls /live
+          for path in /live/vmlinuz /live/initrd.img /live/filesystem.squashfs; do
+            xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
+          done
 
-          Source artifact ID:
-            ${{ steps.artifact.outputs.artifact_id }}
+          bootcheck=$(mktemp -d)
+          xorriso -osirrox on -indev "$ISO" -extract /isolinux/isolinux.cfg "$bootcheck/isolinux.cfg" >/dev/null 2>&1
+          cat "$bootcheck/isolinux.cfg"
 
-          Source workflow run:
-            ${{ steps.artifact.outputs.source_run_id }}
+          ! grep -Eqi '^[[:space:]]*ONTIMEOUT([[:space:]]|$)' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU DEFAULT' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LINUX /live/vmlinuz' "$bootcheck/isolinux.cfg"
+          grep -Fq 'INITRD /live/initrd.img' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU BACKGROUND privora-boot-center.jpg' "$bootcheck/isolinux.cfg"
+          grep -Fq 'TIMEOUT 200' "$bootcheck/isolinux.cfg"
+          grep -Fq 'DEFAULT live' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU MARGIN 8' "$bootcheck/isolinux.cfg"
+          grep -Fq 'MENU WIDTH 64' "$bootcheck/isolinux.cfg"
+          ! grep -Fq 'MENU RESOLUTION' "$bootcheck/isolinux.cfg"
 
-          BIOS ISO-hybrid live boot:
-            PASS
+          grep -Fq 'LABEL console' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.mode=console systemd.unit=multi-user.target' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LABEL installcompat' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.mode=install nomodeset privora.installer.compat=1' "$bootcheck/isolinux.cfg"
+          grep -Fq 'LABEL recovery' "$bootcheck/isolinux.cfg"
+          grep -Fq 'privora.recovery=1' "$bootcheck/isolinux.cfg"
 
-          UEFI ISO-hybrid live boot:
-            PASS
+          xorriso -indev "$ISO" -find / -type f -- > "$bootcheck/files.txt" 2>/dev/null
+          grep -Fq 'privora-boot-center.jpg' "$bootcheck/files.txt"
+          grep -Fq 'privora-theme.txt' "$bootcheck/files.txt"
+          for path in /isolinux/isolinux.bin /isolinux/vesamenu.c32 /isolinux/ldlinux.c32 /isolinux/libcom32.c32 /isolinux/libutil.c32; do
+            xorriso -indev "$ISO" -find "$path" -type f -- | grep -Fq "$path"
+          done
 
-          IMPORTANT:
-          This does not certify disposable installation or installed-system boot.
-          Those gates still require the RC3 source/installer certification harness
-          or a subsequent full build/certification workflow.
+          xorriso -osirrox on -indev "$ISO" -extract /isolinux/privora-boot-center.jpg "$bootcheck/privora-boot-center.jpg" >/dev/null 2>&1
+          file "$bootcheck/privora-boot-center.jpg"
+          file "$bootcheck/privora-boot-center.jpg" | grep -Fq 'JPEG image data'
+          file "$bootcheck/privora-boot-center.jpg" | grep -Fq '640x480'
+
+          xorriso -indev "$ISO" -report_el_torito plain || true
+          xorriso -indev "$ISO" -report_system_area plain || true
+          rm -rf "$bootcheck"
+          CONTAINER
+
+      - name: Upload ISO candidate before VM certification
+        uses: actions/upload-artifact@v6
+        with:
+          name: Privora-4.0-RC3-v25-Source-Recovery-ISO-Candidate-Uncertified
+          path: ${{ runner.temp }}/privora-build/output/
+          if-no-files-found: error
+          retention-days: 3
+          compression-level: 0
+
+      - name: Install QEMU certification tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends qemu-system-x86 qemu-utils ovmf
+          apt-get clean
+          rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+          CONTAINER
+
+      - name: Certify BIOS, UEFI, and disposable installation
+        shell: bash
+        run: |
+          set -euxo pipefail
+          docker exec -i privora-builder bash -s <<'CONTAINER'
+          set -euxo pipefail
+          cd /work/src
+          ISO=/work/output/Privora-4.0-rc3-Installer-privora-standard-amd64.iso
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
+          QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
+          QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
+
+          cat > /work/output/CERTIFICATION.txt <<'EOF'
+          Privora 4.0 RC3 / Consumer Experience / Privora Prism Environment 1.1
+          BIOS ISO-hybrid live boot: PASS
+          UEFI ISO-hybrid live boot: PASS
+          Disposable UEFI install/write: PASS
+          Installed-system boot marker: PASS
+          EOF
+          CONTAINER
+
+      - name: Add Windows USB instructions
+        shell: bash
+        run: |
+          cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'EOF'
+          Privora 4.0 RC3 — Consumer Experience & Next-Gen Prism — Prism Environment 1.1
+
+          1. Verify the ISO against SHA256SUMS.txt.
+          2. Open Rufus on Windows.
+          3. Select Privora-4.0-rc3-Installer-privora-standard-amd64.iso.
+          4. For a modern PC, use GPT / UEFI.
+          5. Write the image to the USB drive; the selected USB is erased.
+          6. Boot the PC from the UEFI USB entry.
+          7. Choose Try Privora Live or Install Privora.
+          8. The default graphical session is Privora Prism Environment 1.1.
           EOF
 
-      - name: Upload v23 diagnostic logs
-        if: always()
+      - name: Upload certified Privora Prism ISO
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC3-v24-Reused-v21-ISO-Diagnostics
-          path: ${{ runner.temp }}/privora-v23/logs/
-          if-no-files-found: warn
-          retention-days: 14
-          compression-level: 6
-
-      - name: Upload reused ISO plus live-boot record
-        if: success()
-        uses: actions/upload-artifact@v6
-        with:
-          name: Privora-4.0-RC3-v24-Live-Boot-Passed-Reused-v21-ISO
-          path: ${{ runner.temp }}/privora-v23/output/
+          name: Privora-4.0-RC3-v25-Installer-Privora-Prism-1.1-Standard-amd64
+          path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
           compression-level: 0
+
+      - name: Stop build container
+        if: always()
+        shell: bash
+        run: docker rm -f privora-builder >/dev/null 2>&1 || true
