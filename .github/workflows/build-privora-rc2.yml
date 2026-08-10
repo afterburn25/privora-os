@@ -1,4 +1,4 @@
-name: Privora 4.0 RC4 v39 Rev3 — Resume Existing ISO Certification v2
+name: Privora 4.0 RC4 v39 Rev3 — Resume Existing ISO Certification v3
 
 on:
   workflow_dispatch:
@@ -13,8 +13,8 @@ jobs:
     timeout-minutes: 120
 
     env:
-      SOURCE_NAME: Privora-4.0-RC4-v39-Rev3-Systemd-Build-Context-Web-Source.zip
-      SOURCE_SHA256: a7f6bb5d5e602de1344203d28eed10e42341b2137bfa92470a0a894fd760e981
+      HARNESS_NAME: Privora-4.0-RC4-v39-Rev2-Regression-Audited-Web-Source.zip
+      HARNESS_SHA256: 546d20f7e9eaa43da2cdc577664a77179145abafbb8607994e49c15a2fc99015
       CANDIDATE_ARTIFACT: Privora-4.0-RC4-v39-Rev3-ISO-Candidate-Uncertified
       ISO_NAME: Privora-4.0-rc4-Installer-privora-standard-amd64.iso
 
@@ -32,7 +32,7 @@ jobs:
           echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
 
           {
-            echo 'Privora 4.0 RC4 v39 Rev3 — Existing ISO Certification Resume v2'
+            echo 'Privora 4.0 RC4 v39 Rev3 — Existing ISO Certification Resume v3'
             echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "repository=$GITHUB_REPOSITORY"
             echo "run_id=$GITHUB_RUN_ID"
@@ -40,48 +40,57 @@ jobs:
             echo 'status=initialized'
           } > "$BUILDROOT/output/RESUME-STATUS.txt"
 
-      - name: Find, verify, and unpack exact v39 Rev3 source
+      - name: Find and verify exact certification harness
         shell: bash
         run: |
           set -euxo pipefail
           STATUS="$BUILDROOT/output/RESUME-STATUS.txt"
 
-          SOURCE_PATH=$(find . -maxdepth 6 -type f -name "$SOURCE_NAME" -print -quit)
-          if [ -z "$SOURCE_PATH" ]; then
+          HARNESS_PATH=$(find . -maxdepth 6 -type f -name "$HARNESS_NAME" -print -quit)
+          if [ -z "$HARNESS_PATH" ]; then
             {
-              echo 'status=source-not-found'
-              echo "expected_source=$SOURCE_NAME"
+              echo 'status=harness-not-found'
+              echo "expected_harness=$HARNESS_NAME"
               echo 'nearby_zip_files:'
               find . -maxdepth 6 -type f -name '*.zip' -printf '  %p\n' | sort | head -n 200
             } | tee -a "$STATUS"
             exit 41
           fi
 
-          echo "source_path=$SOURCE_PATH" | tee -a "$STATUS"
-          actual=$(sha256sum "$SOURCE_PATH" | awk '{print $1}')
-          echo "source_sha256=$actual" | tee -a "$STATUS"
-          if [ "$actual" != "$SOURCE_SHA256" ]; then
+          echo "harness_path=$HARNESS_PATH" | tee -a "$STATUS"
+          actual=$(sha256sum "$HARNESS_PATH" | awk '{print $1}')
+          echo "harness_sha256=$actual" | tee -a "$STATUS"
+          if [ "$actual" != "$HARNESS_SHA256" ]; then
             {
-              echo 'status=source-sha256-mismatch'
-              echo "expected_sha256=$SOURCE_SHA256"
+              echo 'status=harness-sha256-mismatch'
+              echo "expected_sha256=$HARNESS_SHA256"
               echo "actual_sha256=$actual"
             } | tee -a "$STATUS"
             exit 42
           fi
 
-          unzip -t "$SOURCE_PATH" >/dev/null
-          unzip -q "$SOURCE_PATH" -d "$BUILDROOT/src"
+          unzip -t "$HARNESS_PATH" >/dev/null
+          unzip -q "$HARNESS_PATH" -d "$BUILDROOT/src"
 
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc4'
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.3.1'
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.2.0'
-          grep -Fq 'systemd-build-context-hotfix=v39-rev3' \
-            "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          # Rev2 and Rev3 runtime-certification harnesses are byte-identical.
+          echo '98b2f69f9181d01804ce5cffa58e03f1e46e9561aa87f09ac8a80d05be56a935  ci/qemu-live-smoke.sh' \
+            | (cd "$BUILDROOT/src" && sha256sum -c -)
+          echo 'bf59d356f7d73a7293e5e95300e15734b8ab129a6953baa61a55c85b44409a45  ci/qemu-mode-smoke.sh' \
+            | (cd "$BUILDROOT/src" && sha256sum -c -)
+          echo 'e3124eb422429e7dfbdef681bd432d86a2bbdcb711829f48aa702bbf7f5fc6c1  installer/vm/run-install-core-certification.sh' \
+            | (cd "$BUILDROOT/src" && sha256sum -c -)
 
-          chmod -R u+rwX "$BUILDROOT/src"
-          find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x \
+            "$BUILDROOT/src/ci/qemu-live-smoke.sh" \
+            "$BUILDROOT/src/ci/qemu-mode-smoke.sh" \
+            "$BUILDROOT/src/installer/vm/run-install-core-certification.sh"
 
-          echo 'status=source-verified' | tee -a "$STATUS"
+          {
+            echo 'status=harness-verified'
+            echo 'harness_release=v39-rev2'
+            echo 'harness_role=runtime-certification-only'
+            echo 'harness_equivalence=rev2-rev3-byte-identical'
+          } | tee -a "$STATUS"
 
       - name: Locate newest preserved v39 Rev3 ISO candidate
         id: artifact
@@ -172,6 +181,45 @@ jobs:
             echo "iso_bytes=$(stat -c %s "$BUILDROOT/output/$ISO_NAME")"
           } >> "$BUILDROOT/output/RESUME-STATUS.txt"
           find "$BUILDROOT/output" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort             | tee "$BUILDROOT/logs/output-after-download.txt"
+
+      - name: Prove downloaded ISO is Privora v39 Rev3
+        shell: bash
+        run: |
+          set -euxo pipefail
+          STATUS="$BUILDROOT/output/RESUME-STATUS.txt"
+          ISO="$BUILDROOT/output/$ISO_NAME"
+          test -s "$ISO"
+
+          check="$BUILDROOT/lineage-check"
+          rm -rf "$check"
+          mkdir -p "$check"
+
+          docker pull debian:13
+          docker run --rm \
+            -v "$BUILDROOT:/work" \
+            debian:13 bash -s <<'CONTAINER'
+          set -euxo pipefail
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            xorriso squashfs-tools
+          xorriso -osirrox on \
+            -indev /work/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso \
+            -extract /live/filesystem.squashfs /work/lineage-check/filesystem.squashfs \
+            >/dev/null 2>&1
+          unsquashfs -cat /work/lineage-check/filesystem.squashfs \
+            etc/privora/reconstruction > /work/lineage-check/reconstruction.txt
+          CONTAINER
+
+          grep -Fq 'hardware-daily-driver-reliability=v39' "$check/reconstruction.txt"
+          grep -Fq 'regression-audit-hotfix=v39-rev2' "$check/reconstruction.txt"
+          grep -Fq 'systemd-build-context-hotfix=v39-rev3' "$check/reconstruction.txt"
+          grep -Fq 'boot-installer-visual-recovery=v38' "$check/reconstruction.txt"
+
+          {
+            echo 'status=iso-lineage-verified'
+            echo 'iso_release=v39-rev3'
+            echo 'iso_lineage_marker=systemd-build-context-hotfix=v39-rev3'
+          } | tee -a "$STATUS"
 
       - name: Start Debian 13 certification container
         shell: bash
