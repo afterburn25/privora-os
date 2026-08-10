@@ -110,10 +110,30 @@ jobs:
             ca-certificates curl git make unzip xz-utils live-build debootstrap squashfs-tools xorriso \
             syslinux-common isolinux grub-pc-bin grub-efi-amd64-bin shim-signed \
             dosfstools e2fsprogs btrfs-progs xfsprogs cryptsetup mtools \
-            dpkg-dev python3 python3-pil gzip coreutils gcc binutils file sbsigntool
+            dpkg-dev python3 python3-pil gzip coreutils gcc libc6-dev binutils file sbsigntool
           for tool in curl make gcc ld readelf nm file dpkg-deb dpkg-scanpackages xorriso lb python3; do
             command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 127; }
           done
+
+          # Limine's binary release includes a small host installer that must be
+          # compiled locally. gcc alone is not enough; libc development headers
+          # (including stdio.h) must be present.
+          test -r /usr/include/stdio.h || {
+            echo 'ERROR: C development headers are missing (/usr/include/stdio.h).' >&2
+            exit 125
+          }
+
+          cat > /tmp/privora-c-toolchain-test.c <<'C'
+          #include <stdio.h>
+          int main(void) {
+              puts("PRIVORA_C_TOOLCHAIN_OK");
+              return 0;
+          }
+          C
+          gcc /tmp/privora-c-toolchain-test.c -o /tmp/privora-c-toolchain-test
+          /tmp/privora-c-toolchain-test | grep -Fxq 'PRIVORA_C_TOOLCHAIN_OK'
+          rm -f /tmp/privora-c-toolchain-test.c /tmp/privora-c-toolchain-test
+          echo 'PASS: C compiler + libc development headers are ready for Limine'
           CONTAINER
 
       - name: Fetch and verify pinned Privora Boot Core
@@ -132,7 +152,7 @@ jobs:
           echo "PASS: pinned Limine 12.5.2 boot core fetched and checksum verified: $LIMINE_DIR"
           CONTAINER
 
-      - name: Validate RC4 v33 permanent source
+      - name: Validate RC4 v33 permanent source for v34 build
         shell: bash
         run: |
           set -euxo pipefail
@@ -169,7 +189,7 @@ jobs:
       - name: Preserve ISO immediately after successful build
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC4-v33-Boot-Center-ISO-Candidate-Uncertified
+          name: Privora-4.0-RC4-v34-Boot-Center-ISO-Candidate-Uncertified
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 30
