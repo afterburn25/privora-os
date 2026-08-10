@@ -1,4 +1,4 @@
-name: Build Privora 4.0 RC4 — v39 Rev4 Artifact-Persistent Build & Certification
+name: Build Privora 4.0 RC4 — v39 Rev5 Hardware Readiness Runtime Hotfix
 on:
   workflow_dispatch:
     inputs:
@@ -36,12 +36,12 @@ jobs:
         sudo apt-get clean || true
         df -h /
 
-    - name: Select exact Privora RC4 v39 Rev3 source
+    - name: Select exact Privora RC4 v39 Rev5 source
       shell: bash
       run: |
         set -euxo pipefail
-        EXPECTED_SHA256='a7f6bb5d5e602de1344203d28eed10e42341b2137bfa92470a0a894fd760e981'
-        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev3-Systemd-Build-Context-Web-Source.zip'
+        EXPECTED_SHA256='0c7455c3a0a5432d13ccc0b93f76ed15b82fd8a1b40d60c6af8710275bc35e38'
+        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev5-Hardware-Readiness-Runtime-Web-Source.zip'
 
         SOURCE_ZIP=$(find . -maxdepth 3 -type f -name "$EXPECTED_NAME" -print -quit)
         if [ -z "$SOURCE_ZIP" ]; then
@@ -54,7 +54,7 @@ jobs:
         echo "source=$SOURCE_ZIP"
         echo "sha256=$actual"
         if [ "$actual" != "$EXPECTED_SHA256" ]; then
-          echo 'ERROR: RC4 v39 Rev3 source checksum mismatch.' >&2
+          echo 'ERROR: RC4 v39 Rev5 source checksum mismatch.' >&2
           echo "Expected: $EXPECTED_SHA256" >&2
           echo "Actual:   $actual" >&2
           exit 42
@@ -72,6 +72,7 @@ jobs:
         grep -Fq 'hardware-daily-driver-reliability=v39' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'regression-audit-hotfix=v39-rev2' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'systemd-build-context-hotfix=v39-rev3' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'hardware-readiness-runtime-hotfix=v39-rev5' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'hardware-readiness-schema=1' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
 
         test -f "$BUILDROOT/src/platform/lib/privora_hardware.py"
@@ -80,6 +81,9 @@ jobs:
         test -L "$BUILDROOT/src/distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants/privora-hardware-readiness.service"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev2-regression-audit-test.py"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev3-systemd-build-context-test.py"
+        test -f "$BUILDROOT/src/tests/rc4-v39-rev5-hardware-readiness-runtime-test.py"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV5-HARDWARE-READINESS-RUNTIME.md"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV5-VALIDATION.txt"
         test -f "$BUILDROOT/src/release/RC4-v39-REV3-SYSTEMD-BUILD-CONTEXT.md"
         test -f "$BUILDROOT/src/release/RC4-v39-REV3-VALIDATION.txt"
         test -f "$BUILDROOT/src/tests/rc4-v39-hardware-daily-driver-test.py"
@@ -104,12 +108,18 @@ jobs:
         ! grep -Fq 'systemctl enable privora-hardware-readiness.service' "$BUILDROOT/src/tools/build-first-party-debs.py"
         grep -Fq 'def systemd_runtime_available' "$BUILDROOT/src/tools/hardware-cert-report.py"
         grep -Fq "Path('/proc/1/comm')" "$BUILDROOT/src/platform/lib/privora_hardware.py"
+        grep -Fq 'StateDirectory=privora' "$BUILDROOT/src/platform/systemd/privora-hardware-readiness.service"
+        grep -Fq 'StateDirectoryMode=0755' "$BUILDROOT/src/platform/systemd/privora-hardware-readiness.service"
+        grep -Fq 'TimeoutStartSec=90' "$BUILDROOT/src/platform/systemd/privora-hardware-readiness.service"
+        grep -Fq 'Hardware readiness is advisory' "$BUILDROOT/src/platform/lib/privora-hardware-readiness"
+        grep -Fq 'hardware_readiness_failed()' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        grep -Fq 'Hardware Readiness service failed during mode certification' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
 
         chmod -R u+rwX "$BUILDROOT/src"
         find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
         chmod +x "$BUILDROOT/src/ci/qemu-mode-smoke.sh" "$BUILDROOT/src/tools/fetch-limine.sh" "$BUILDROOT/src/tools/privora-boot-core-build.sh"
         echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
-        echo 'PASS: exact Privora RC4 v39 Rev3 systemd-context-audited source selected'
+        echo 'PASS: exact Privora RC4 v39 Rev5 hardware-readiness-runtime source selected'
 
     - name: Start Debian 13 build container
       shell: bash
@@ -192,7 +202,7 @@ jobs:
         echo "PASS: pinned Limine 12.5.2 boot core fetched and checksum verified: $LIMINE_DIR"
         CONTAINER
 
-    - name: Validate RC4 v39 Rev3 permanent source
+    - name: Validate RC4 v39 Rev5 permanent source
       shell: bash
       run: |
         set -euxo pipefail
@@ -200,12 +210,19 @@ jobs:
         set -euxo pipefail
         cd /work/src
         ./ci/validate-rc4-unified.sh
+        python3 tests/rc4-v39-rev5-hardware-readiness-runtime-test.py
+        python3 tests/rc4-v39-hardware-daily-driver-test.py
+        python3 tests/rc4-v39-rev3-systemd-build-context-test.py
+        python3 tests/rc4-v39-rev2-regression-audit-test.py
+        python3 tests/rc4-v38-boot-installer-visual-recovery-test.py
+        python3 tests/privora-boot-center-test.py
+        python3 tests/systemd-context-safety-test.py
         bash -n ci/qemu-mode-smoke.sh
         rm -rf release/.deb-work release/debs prism/.build prism/dist
         find . -type d -name __pycache__ -prune -exec rm -rf {} +
         CONTAINER
 
-    - name: Build Privora RC4 v39 Rev3 ISO
+    - name: Build Privora RC4 v39 Rev5 ISO
       shell: bash
       run: |
         set -euxo pipefail
@@ -227,17 +244,19 @@ jobs:
         cp /work/src/release/RC4-v39-REV2-REGRESSION-AUDIT.md .
         cp /work/src/release/RC4-v39-REV3-SYSTEMD-BUILD-CONTEXT.md .
         cp /work/src/release/RC4-v39-REV3-VALIDATION.txt .
-        cp /work/src/release/audit/source-files.json SOURCE-AUDIT-v39-REV3.json
-        cp /work/src/release/audit/sbom.spdx-lite.json SBOM-v39-REV3.spdx-lite.json
+        cp /work/src/release/RC4-v39-REV5-HARDWARE-READINESS-RUNTIME.md .
+        cp /work/src/release/RC4-v39-REV5-VALIDATION.txt .
+        cp /work/src/release/audit/source-files.json SOURCE-AUDIT-v39-REV5.json
+        cp /work/src/release/audit/sbom.spdx-lite.json SBOM-v39-REV5.spdx-lite.json
         cd /work/src/distro
         lb clean --purge || true
         rm -rf chroot binary cache .build || true
         CONTAINER
 
-    - name: Upload immutable v39 Rev3 ISO candidate
+    - name: Upload immutable v39 Rev5 ISO candidate
       uses: actions/upload-artifact@v7
       with:
-        name: Privora-4.0-RC4-v39-Rev3-ISO-Candidate-Uncertified
+        name: Privora-4.0-RC4-v39-Rev5-ISO-Candidate-Uncertified
         path: ${{ runner.temp }}/privora-build/output/
         if-no-files-found: error
         retention-days: 30
@@ -267,12 +286,12 @@ jobs:
         sudo apt-get clean || true
         df -h /
 
-    - name: Select exact Privora RC4 v39 Rev3 source
+    - name: Select exact Privora RC4 v39 Rev5 source
       shell: bash
       run: |
         set -euxo pipefail
-        EXPECTED_SHA256='a7f6bb5d5e602de1344203d28eed10e42341b2137bfa92470a0a894fd760e981'
-        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev3-Systemd-Build-Context-Web-Source.zip'
+        EXPECTED_SHA256='0c7455c3a0a5432d13ccc0b93f76ed15b82fd8a1b40d60c6af8710275bc35e38'
+        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev5-Hardware-Readiness-Runtime-Web-Source.zip'
 
         SOURCE_ZIP=$(find . -maxdepth 3 -type f -name "$EXPECTED_NAME" -print -quit)
         if [ -z "$SOURCE_ZIP" ]; then
@@ -285,7 +304,7 @@ jobs:
         echo "source=$SOURCE_ZIP"
         echo "sha256=$actual"
         if [ "$actual" != "$EXPECTED_SHA256" ]; then
-          echo 'ERROR: RC4 v39 Rev3 source checksum mismatch.' >&2
+          echo 'ERROR: RC4 v39 Rev5 source checksum mismatch.' >&2
           echo "Expected: $EXPECTED_SHA256" >&2
           echo "Actual:   $actual" >&2
           exit 42
@@ -303,6 +322,7 @@ jobs:
         grep -Fq 'hardware-daily-driver-reliability=v39' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'regression-audit-hotfix=v39-rev2' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'systemd-build-context-hotfix=v39-rev3' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'hardware-readiness-runtime-hotfix=v39-rev5' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'hardware-readiness-schema=1' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
 
         test -f "$BUILDROOT/src/platform/lib/privora_hardware.py"
@@ -311,6 +331,9 @@ jobs:
         test -L "$BUILDROOT/src/distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants/privora-hardware-readiness.service"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev2-regression-audit-test.py"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev3-systemd-build-context-test.py"
+        test -f "$BUILDROOT/src/tests/rc4-v39-rev5-hardware-readiness-runtime-test.py"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV5-HARDWARE-READINESS-RUNTIME.md"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV5-VALIDATION.txt"
         test -f "$BUILDROOT/src/release/RC4-v39-REV3-SYSTEMD-BUILD-CONTEXT.md"
         test -f "$BUILDROOT/src/release/RC4-v39-REV3-VALIDATION.txt"
         test -f "$BUILDROOT/src/tests/rc4-v39-hardware-daily-driver-test.py"
@@ -335,12 +358,18 @@ jobs:
         ! grep -Fq 'systemctl enable privora-hardware-readiness.service' "$BUILDROOT/src/tools/build-first-party-debs.py"
         grep -Fq 'def systemd_runtime_available' "$BUILDROOT/src/tools/hardware-cert-report.py"
         grep -Fq "Path('/proc/1/comm')" "$BUILDROOT/src/platform/lib/privora_hardware.py"
+        grep -Fq 'StateDirectory=privora' "$BUILDROOT/src/platform/systemd/privora-hardware-readiness.service"
+        grep -Fq 'StateDirectoryMode=0755' "$BUILDROOT/src/platform/systemd/privora-hardware-readiness.service"
+        grep -Fq 'TimeoutStartSec=90' "$BUILDROOT/src/platform/systemd/privora-hardware-readiness.service"
+        grep -Fq 'Hardware readiness is advisory' "$BUILDROOT/src/platform/lib/privora-hardware-readiness"
+        grep -Fq 'hardware_readiness_failed()' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        grep -Fq 'Hardware Readiness service failed during mode certification' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
 
         chmod -R u+rwX "$BUILDROOT/src"
         find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
         chmod +x "$BUILDROOT/src/ci/qemu-mode-smoke.sh" "$BUILDROOT/src/tools/fetch-limine.sh" "$BUILDROOT/src/tools/privora-boot-core-build.sh"
         echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
-        echo 'PASS: exact Privora RC4 v39 Rev3 systemd-context-audited source selected'
+        echo 'PASS: exact Privora RC4 v39 Rev5 hardware-readiness-runtime source selected'
 
     - name: Download exact ISO candidate from build job
       uses: actions/download-artifact@v8
@@ -349,7 +378,7 @@ jobs:
         path: ${{ runner.temp }}/privora-build/output
     - name: Verify downloaded candidate identity
       shell: bash
-      run: "set -euxo pipefail\nISO=\"$BUILDROOT/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso\"\ntest -s \"$ISO\"\nsha256sum \"$ISO\" | tee \"$BUILDROOT/output/REUSED-ISO-SHA256.txt\"\n{\n  echo \"Privora 4.0 RC4 v39 Rev4 — Artifact-Persistent Certification Split\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n  echo \"iso_bytes=$(stat -c %s \"$ISO\")\"\n  echo \"iso_sha256=$(sha256sum \"$ISO\" | awk '{print $1}')\"\n  echo \"status=downloaded-and-verified\"\n} > \"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV4.txt\"\n"
+      run: "set -euxo pipefail\nISO=\"$BUILDROOT/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso\"\ntest -s \"$ISO\"\nsha256sum \"$ISO\" | tee \"$BUILDROOT/output/REUSED-ISO-SHA256.txt\"\n{\n  echo \"Privora 4.0 RC4 v39 Rev5 — Hardware Readiness Runtime Certification\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n  echo \"iso_bytes=$(stat -c %s \"$ISO\")\"\n  echo \"iso_sha256=$(sha256sum \"$ISO\" | awk '{print $1}')\"\n  echo \"status=downloaded-and-verified\"\n} > \"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV5.txt\"\n"
     - name: Start Debian 13 certification container
       shell: bash
       run: |
@@ -363,7 +392,7 @@ jobs:
     - name: Configure certification environment
       shell: bash
       run: "set -euxo pipefail\ndocker exec -i privora-certifier bash -s <<'CONTAINER'\nset -euxo pipefail\napt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends   ca-certificates file xorriso squashfs-tools   qemu-system-x86 qemu-utils ovmf socat   python3 python3-pil e2fsprogs dosfstools mtools\napt-get clean\nrm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*\nCONTAINER\n"
-    - name: Verify finished v39 Rev3 ISO payload
+    - name: Verify finished v39 Rev5 ISO payload
       shell: bash
       run: |
         set -euxo pipefail
@@ -561,6 +590,17 @@ jobs:
         grep -Fq 'ConditionPathExists=!/var/lib/privora/hardware-readiness.json' "$check/hardware-readiness.service"
         grep -Fq 'ReadWritePaths=/var/lib/privora' "$check/hardware-readiness.service"
         grep -Fq 'IOSchedulingClass=idle' "$check/hardware-readiness.service"
+        grep -Fq 'StateDirectory=privora' "$check/hardware-readiness.service"
+        grep -Fq 'StateDirectoryMode=0755' "$check/hardware-readiness.service"
+        grep -Fq 'TimeoutStartSec=90' "$check/hardware-readiness.service"
+        grep -Fq 'StandardOutput=journal' "$check/hardware-readiness.service"
+        grep -Fq 'StandardError=journal' "$check/hardware-readiness.service"
+
+        unsquashfs -cat "$check/filesystem.squashfs"   usr/lib/privora/privora-hardware-readiness > "$check/hardware-readiness-runner"
+        grep -Fq 'Hardware readiness is advisory' "$check/hardware-readiness-runner"
+        grep -Fq 'degraded_report(reason)' "$check/hardware-readiness-runner"
+        grep -Fq 'PRIVORA_HARDWARE_READY' "$check/hardware-readiness-runner"
+        ! grep -Fq 'sys.exit(1)' "$check/hardware-readiness-runner"
 
         unsquashfs -cat "$check/filesystem.squashfs" \
           usr/lib/privora/privora_platform.py > "$check/privora_platform.py"
@@ -591,6 +631,7 @@ jobs:
         grep -Fq 'hardware-readiness-schema=1' "$check/reconstruction.txt"
         grep -Fq 'regression-audit-hotfix=v39-rev2' "$check/reconstruction.txt"
         grep -Fq 'systemd-build-context-hotfix=v39-rev3' "$check/reconstruction.txt"
+        grep -Fq 'hardware-readiness-runtime-hotfix=v39-rev5' "$check/reconstruction.txt"
 
         # Rev2 semantic hardware fixes must exist in the actual SquashFS.
         grep -Fq 'def run_result' "$check/privora_hardware.py"
@@ -616,7 +657,7 @@ jobs:
         grep -Eq 'UEFI|EFI' "$check/el-torito.txt"
         grep -Eq 'MBR|Protective' "$check/system-area.txt"
 
-        echo 'PASS: final ISO contains v39 Rev3 systemd-safe audited hardware, mapped-frame installer readiness, Boot Center 1.2, Prism 1.3.1, recovery and console contracts'
+        echo 'PASS: final ISO contains v39 Rev5 hardware-readiness runtime fix, audited hardware, mapped-frame installer readiness, Boot Center 1.2, Prism 1.3.1, recovery and console contracts'
         CONTAINER
 
     - name: Capture Privora Boot Center 1.2 visual evidence
@@ -719,7 +760,7 @@ jobs:
     - name: Bind certification to immutable candidate
       if: always()
       shell: bash
-      run: "set +e\nSTATUS=\"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV4.txt\"\nmkdir -p \"$BUILDROOT/output\"\ntouch \"$STATUS\"\n{\n  echo \"finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"job_status=${{ job.status }}\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n} >> \"$STATUS\"\n\nif [ -f \"$BUILDROOT/output/CERTIFICATION-v39-REV3.txt\" ]; then\n  {\n    echo\n    echo \"Immutable GitHub candidate:\"\n    echo \"Artifact ID: ${{ needs.build_iso.outputs.candidate_id }}\"\n    echo \"Artifact digest: ${{ needs.build_iso.outputs.candidate_digest }}\"\n    echo \"Artifact URL: ${{ needs.build_iso.outputs.candidate_url }}\"\n  } >> \"$BUILDROOT/output/CERTIFICATION-v39-REV3.txt\"\nfi\n"
+      run: "if [ -f \"$BUILDROOT/output/CERTIFICATION-v39-REV3.txt\" ] && [ ! -f \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\" ]; then\n  cp \"$BUILDROOT/output/CERTIFICATION-v39-REV3.txt\" \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\"\nfi\nset +e\nSTATUS=\"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV5.txt\"\nmkdir -p \"$BUILDROOT/output\"\ntouch \"$STATUS\"\n{\n  echo \"finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"job_status=${{ job.status }}\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n} >> \"$STATUS\"\n\nif [ -f \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\" ]; then\n  {\n    echo\n    echo \"Immutable GitHub candidate:\"\n    echo \"Artifact ID: ${{ needs.build_iso.outputs.candidate_id }}\"\n    echo \"Artifact digest: ${{ needs.build_iso.outputs.candidate_digest }}\"\n    echo \"Artifact URL: ${{ needs.build_iso.outputs.candidate_url }}\"\n  } >> \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\"\nfi\n"
     - name: Add Windows USB instructions
       if: success()
       shell: bash
@@ -750,8 +791,8 @@ jobs:
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: Privora-4.0-RC4-v39-Rev4-Certification-Evidence
-        path: "${{ runner.temp }}/privora-build/output/CERTIFICATION-STATUS-v39-REV4.txt\n${{ runner.temp }}/privora-build/output/CERTIFICATION-v39-REV3.txt\n${{ runner.temp }}/privora-build/output/PRIVORA-BOOT-CENTER-v39-REV3.png\n${{ runner.temp }}/privora-build/output/PRIVORA-INSTALLER-v39-REV3.png\n${{ runner.temp }}/privora-build/output/REUSED-ISO-SHA256.txt\n${{ runner.temp }}/privora-build/output/SHA256SUMS.txt\n${{ runner.temp }}/privora-build/output/FLASH-TO-USB-WINDOWS.txt\n"
+        name: Privora-4.0-RC4-v39-Rev5-Certification-Evidence
+        path: "${{ runner.temp }}/privora-build/output/CERTIFICATION-STATUS-v39-REV5.txt\n${{ runner.temp }}/privora-build/output/CERTIFICATION-v39-REV5.txt\n${{ runner.temp }}/privora-build/output/PRIVORA-BOOT-CENTER-v39-REV3.png\n${{ runner.temp }}/privora-build/output/PRIVORA-INSTALLER-v39-REV3.png\n${{ runner.temp }}/privora-build/output/REUSED-ISO-SHA256.txt\n${{ runner.temp }}/privora-build/output/SHA256SUMS.txt\n${{ runner.temp }}/privora-build/output/FLASH-TO-USB-WINDOWS.txt\n"
         if-no-files-found: warn
         retention-days: 30
         compression-level: 6
