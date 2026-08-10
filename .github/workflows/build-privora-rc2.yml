@@ -1,4 +1,4 @@
-name: Build Privora 4.0 RC4 — v39 Rev5 Hardware Readiness Runtime Hotfix
+name: Build Privora 4.0 RC4 — v39 Rev7 Certification Marker Broker
 on:
   workflow_dispatch:
     inputs:
@@ -36,12 +36,12 @@ jobs:
         sudo apt-get clean || true
         df -h /
 
-    - name: Select exact Privora RC4 v39 Rev5 source
+    - name: Select exact Privora RC4 v39 Rev7 source
       shell: bash
       run: |
         set -euxo pipefail
-        EXPECTED_SHA256='0c7455c3a0a5432d13ccc0b93f76ed15b82fd8a1b40d60c6af8710275bc35e38'
-        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev5-Hardware-Readiness-Runtime-Web-Source.zip'
+        EXPECTED_SHA256='7a943860d31c3a5e02a95b610d160372d630ee5b6dc9048ec9352273e0125b22'
+        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev7-Certification-Marker-Broker-Web-Source.zip'
 
         SOURCE_ZIP=$(find . -maxdepth 3 -type f -name "$EXPECTED_NAME" -print -quit)
         if [ -z "$SOURCE_ZIP" ]; then
@@ -54,7 +54,7 @@ jobs:
         echo "source=$SOURCE_ZIP"
         echo "sha256=$actual"
         if [ "$actual" != "$EXPECTED_SHA256" ]; then
-          echo 'ERROR: RC4 v39 Rev5 source checksum mismatch.' >&2
+          echo 'ERROR: RC4 v39 Rev7 source checksum mismatch.' >&2
           echo "Expected: $EXPECTED_SHA256" >&2
           echo "Actual:   $actual" >&2
           exit 42
@@ -67,12 +67,16 @@ jobs:
         unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
 
         test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc4'
-        test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.3.1'
-        test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.2.0'
+        test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.4.0'
+        test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.3.0'
         grep -Fq 'hardware-daily-driver-reliability=v39' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'regression-audit-hotfix=v39-rev2' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'systemd-build-context-hotfix=v39-rev3' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'hardware-readiness-runtime-hotfix=v39-rev5' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'boot-installer-prism-runtime-recovery=v39-rev6' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'certification-marker-broker=v39-rev7' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'privora-prism-native-runtime=1.4.0' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'privora-boot-center=1.3.0' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'hardware-readiness-schema=1' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
 
         test -f "$BUILDROOT/src/platform/lib/privora_hardware.py"
@@ -82,6 +86,12 @@ jobs:
         test -f "$BUILDROOT/src/tests/rc4-v39-rev2-regression-audit-test.py"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev3-systemd-build-context-test.py"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev5-hardware-readiness-runtime-test.py"
+        test -f "$BUILDROOT/src/tests/rc4-v39-rev6-boot-installer-prism-runtime-test.py"
+        test -f "$BUILDROOT/src/tests/rc4-v39-rev7-certification-marker-broker-test.py"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV7-CERTIFICATION-MARKER-BROKER.md"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV7-VALIDATION.txt"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV6-BOOT-INSTALLER-PRISM-RUNTIME.md"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV6-VALIDATION.txt"
         test -f "$BUILDROOT/src/release/RC4-v39-REV5-HARDWARE-READINESS-RUNTIME.md"
         test -f "$BUILDROOT/src/release/RC4-v39-REV5-VALIDATION.txt"
         test -f "$BUILDROOT/src/release/RC4-v39-REV3-SYSTEMD-BUILD-CONTEXT.md"
@@ -114,12 +124,33 @@ jobs:
         grep -Fq 'Hardware readiness is advisory' "$BUILDROOT/src/platform/lib/privora-hardware-readiness"
         grep -Fq 'hardware_readiness_failed()' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
         grep -Fq 'Hardware Readiness service failed during mode certification' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        grep -Fq 'term_font_scale: 5x3' "$BUILDROOT/src/boot/privora-boot-center/limine.conf"
+        grep -Fq 'term_margin: 96' "$BUILDROOT/src/boot/privora-boot-center/limine.conf"
+        grep -Fq '$tree/EFI/BOOT/limine.conf' "$BUILDROOT/src/tools/privora-boot-core-build.sh"
+        grep -Fq 'privora-prism-mode-guardian' "$BUILDROOT/src/prism/bin/privora-prism-session"
+        grep -Fq 'panelCount === 2' "$BUILDROOT/src/prism/bin/privora-prism-panel-ensure"
+        grep -Fq 'run_calamares' "$BUILDROOT/src/installer/live/privora-installer-launch"
+        grep -Fq 'QT_QPA_PLATFORM=xcb' "$BUILDROOT/src/installer/live/privora-calamares-root"
+        grep -Fq 'PRIVORA_PROGRESS:85' "$BUILDROOT/src/branding/privora/plymouth/privora.script"
+        test -x "$BUILDROOT/src/platform/bin/privora-cert-signal"
+        test -x "$BUILDROOT/src/platform/lib/privora-certification-broker"
+        test -f "$BUILDROOT/src/platform/systemd/privora-certification-broker.service"
+        test -f "$BUILDROOT/src/platform/systemd/privora-graphical-target-marker.service"
+        test -L "$BUILDROOT/src/distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants/privora-certification-broker.service"
+        test -L "$BUILDROOT/src/distro/config/includes.chroot/etc/systemd/system/graphical.target.wants/privora-graphical-target-marker.service"
+        grep -Fq "grep -Eq '^PRIVORA_[A-Z0-9_]+$'" "$BUILDROOT/src/platform/bin/privora-cert-signal"
+        grep -Fq 'chmod 1733' "$BUILDROOT/src/platform/lib/privora-certification-broker"
+        grep -Fq 'PRIVORA_GRAPHICAL_TARGET_READY' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        grep -Fq 'QEMU_MODE_TIMEOUT_SCREENSHOT' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        ! grep -Fq '/dev/ttyS0' "$BUILDROOT/src/prism/bin/privora-prism-session"
+        ! grep -Fq '/dev/ttyS0' "$BUILDROOT/src/prism/bin/privora-prism-mode-guardian"
+        ! grep -Fq '/dev/ttyS0' "$BUILDROOT/src/installer/live/privora-installer-launch"
 
         chmod -R u+rwX "$BUILDROOT/src"
         find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
         chmod +x "$BUILDROOT/src/ci/qemu-mode-smoke.sh" "$BUILDROOT/src/tools/fetch-limine.sh" "$BUILDROOT/src/tools/privora-boot-core-build.sh"
         echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
-        echo 'PASS: exact Privora RC4 v39 Rev5 hardware-readiness-runtime source selected'
+        echo 'PASS: exact Privora RC4 v39 Rev7 certification-marker-broker source selected'
 
     - name: Start Debian 13 build container
       shell: bash
@@ -202,7 +233,7 @@ jobs:
         echo "PASS: pinned Limine 12.5.2 boot core fetched and checksum verified: $LIMINE_DIR"
         CONTAINER
 
-    - name: Validate RC4 v39 Rev5 permanent source
+    - name: Validate RC4 v39 Rev7 permanent source
       shell: bash
       run: |
         set -euxo pipefail
@@ -211,6 +242,8 @@ jobs:
         cd /work/src
         ./ci/validate-rc4-unified.sh
         python3 tests/rc4-v39-rev5-hardware-readiness-runtime-test.py
+        python3 tests/rc4-v39-rev6-boot-installer-prism-runtime-test.py
+        python3 tests/rc4-v39-rev7-certification-marker-broker-test.py
         python3 tests/rc4-v39-hardware-daily-driver-test.py
         python3 tests/rc4-v39-rev3-systemd-build-context-test.py
         python3 tests/rc4-v39-rev2-regression-audit-test.py
@@ -222,7 +255,7 @@ jobs:
         find . -type d -name __pycache__ -prune -exec rm -rf {} +
         CONTAINER
 
-    - name: Build Privora RC4 v39 Rev5 ISO
+    - name: Build Privora RC4 v39 Rev7 ISO
       shell: bash
       run: |
         set -euxo pipefail
@@ -246,17 +279,21 @@ jobs:
         cp /work/src/release/RC4-v39-REV3-VALIDATION.txt .
         cp /work/src/release/RC4-v39-REV5-HARDWARE-READINESS-RUNTIME.md .
         cp /work/src/release/RC4-v39-REV5-VALIDATION.txt .
-        cp /work/src/release/audit/source-files.json SOURCE-AUDIT-v39-REV5.json
-        cp /work/src/release/audit/sbom.spdx-lite.json SBOM-v39-REV5.spdx-lite.json
+        cp /work/src/release/RC4-v39-REV6-BOOT-INSTALLER-PRISM-RUNTIME.md .
+        cp /work/src/release/RC4-v39-REV6-VALIDATION.txt .
+        cp /work/src/release/RC4-v39-REV7-CERTIFICATION-MARKER-BROKER.md .
+        cp /work/src/release/RC4-v39-REV7-VALIDATION.txt .
+        cp /work/src/release/audit/source-files.json SOURCE-AUDIT-v39-REV7.json
+        cp /work/src/release/audit/sbom.spdx-lite.json SBOM-v39-REV7.spdx-lite.json
         cd /work/src/distro
         lb clean --purge || true
         rm -rf chroot binary cache .build || true
         CONTAINER
 
-    - name: Upload immutable v39 Rev5 ISO candidate
+    - name: Upload immutable v39 Rev7 ISO candidate
       uses: actions/upload-artifact@v7
       with:
-        name: Privora-4.0-RC4-v39-Rev5-ISO-Candidate-Uncertified
+        name: Privora-4.0-RC4-v39-Rev7-ISO-Candidate-Uncertified
         path: ${{ runner.temp }}/privora-build/output/
         if-no-files-found: error
         retention-days: 30
@@ -286,12 +323,12 @@ jobs:
         sudo apt-get clean || true
         df -h /
 
-    - name: Select exact Privora RC4 v39 Rev5 source
+    - name: Select exact Privora RC4 v39 Rev7 source
       shell: bash
       run: |
         set -euxo pipefail
-        EXPECTED_SHA256='0c7455c3a0a5432d13ccc0b93f76ed15b82fd8a1b40d60c6af8710275bc35e38'
-        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev5-Hardware-Readiness-Runtime-Web-Source.zip'
+        EXPECTED_SHA256='7a943860d31c3a5e02a95b610d160372d630ee5b6dc9048ec9352273e0125b22'
+        EXPECTED_NAME='Privora-4.0-RC4-v39-Rev7-Certification-Marker-Broker-Web-Source.zip'
 
         SOURCE_ZIP=$(find . -maxdepth 3 -type f -name "$EXPECTED_NAME" -print -quit)
         if [ -z "$SOURCE_ZIP" ]; then
@@ -304,7 +341,7 @@ jobs:
         echo "source=$SOURCE_ZIP"
         echo "sha256=$actual"
         if [ "$actual" != "$EXPECTED_SHA256" ]; then
-          echo 'ERROR: RC4 v39 Rev5 source checksum mismatch.' >&2
+          echo 'ERROR: RC4 v39 Rev7 source checksum mismatch.' >&2
           echo "Expected: $EXPECTED_SHA256" >&2
           echo "Actual:   $actual" >&2
           exit 42
@@ -317,12 +354,16 @@ jobs:
         unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
 
         test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc4'
-        test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.3.1'
-        test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.2.0'
+        test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.4.0'
+        test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.3.0'
         grep -Fq 'hardware-daily-driver-reliability=v39' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'regression-audit-hotfix=v39-rev2' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'systemd-build-context-hotfix=v39-rev3' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'hardware-readiness-runtime-hotfix=v39-rev5' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'boot-installer-prism-runtime-recovery=v39-rev6' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'certification-marker-broker=v39-rev7' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'privora-prism-native-runtime=1.4.0' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+        grep -Fq 'privora-boot-center=1.3.0' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
         grep -Fq 'hardware-readiness-schema=1' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
 
         test -f "$BUILDROOT/src/platform/lib/privora_hardware.py"
@@ -332,6 +373,12 @@ jobs:
         test -f "$BUILDROOT/src/tests/rc4-v39-rev2-regression-audit-test.py"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev3-systemd-build-context-test.py"
         test -f "$BUILDROOT/src/tests/rc4-v39-rev5-hardware-readiness-runtime-test.py"
+        test -f "$BUILDROOT/src/tests/rc4-v39-rev6-boot-installer-prism-runtime-test.py"
+        test -f "$BUILDROOT/src/tests/rc4-v39-rev7-certification-marker-broker-test.py"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV7-CERTIFICATION-MARKER-BROKER.md"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV7-VALIDATION.txt"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV6-BOOT-INSTALLER-PRISM-RUNTIME.md"
+        test -f "$BUILDROOT/src/release/RC4-v39-REV6-VALIDATION.txt"
         test -f "$BUILDROOT/src/release/RC4-v39-REV5-HARDWARE-READINESS-RUNTIME.md"
         test -f "$BUILDROOT/src/release/RC4-v39-REV5-VALIDATION.txt"
         test -f "$BUILDROOT/src/release/RC4-v39-REV3-SYSTEMD-BUILD-CONTEXT.md"
@@ -364,12 +411,33 @@ jobs:
         grep -Fq 'Hardware readiness is advisory' "$BUILDROOT/src/platform/lib/privora-hardware-readiness"
         grep -Fq 'hardware_readiness_failed()' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
         grep -Fq 'Hardware Readiness service failed during mode certification' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        grep -Fq 'term_font_scale: 5x3' "$BUILDROOT/src/boot/privora-boot-center/limine.conf"
+        grep -Fq 'term_margin: 96' "$BUILDROOT/src/boot/privora-boot-center/limine.conf"
+        grep -Fq '$tree/EFI/BOOT/limine.conf' "$BUILDROOT/src/tools/privora-boot-core-build.sh"
+        grep -Fq 'privora-prism-mode-guardian' "$BUILDROOT/src/prism/bin/privora-prism-session"
+        grep -Fq 'panelCount === 2' "$BUILDROOT/src/prism/bin/privora-prism-panel-ensure"
+        grep -Fq 'run_calamares' "$BUILDROOT/src/installer/live/privora-installer-launch"
+        grep -Fq 'QT_QPA_PLATFORM=xcb' "$BUILDROOT/src/installer/live/privora-calamares-root"
+        grep -Fq 'PRIVORA_PROGRESS:85' "$BUILDROOT/src/branding/privora/plymouth/privora.script"
+        test -x "$BUILDROOT/src/platform/bin/privora-cert-signal"
+        test -x "$BUILDROOT/src/platform/lib/privora-certification-broker"
+        test -f "$BUILDROOT/src/platform/systemd/privora-certification-broker.service"
+        test -f "$BUILDROOT/src/platform/systemd/privora-graphical-target-marker.service"
+        test -L "$BUILDROOT/src/distro/config/includes.chroot/etc/systemd/system/multi-user.target.wants/privora-certification-broker.service"
+        test -L "$BUILDROOT/src/distro/config/includes.chroot/etc/systemd/system/graphical.target.wants/privora-graphical-target-marker.service"
+        grep -Fq "grep -Eq '^PRIVORA_[A-Z0-9_]+$'" "$BUILDROOT/src/platform/bin/privora-cert-signal"
+        grep -Fq 'chmod 1733' "$BUILDROOT/src/platform/lib/privora-certification-broker"
+        grep -Fq 'PRIVORA_GRAPHICAL_TARGET_READY' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        grep -Fq 'QEMU_MODE_TIMEOUT_SCREENSHOT' "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+        ! grep -Fq '/dev/ttyS0' "$BUILDROOT/src/prism/bin/privora-prism-session"
+        ! grep -Fq '/dev/ttyS0' "$BUILDROOT/src/prism/bin/privora-prism-mode-guardian"
+        ! grep -Fq '/dev/ttyS0' "$BUILDROOT/src/installer/live/privora-installer-launch"
 
         chmod -R u+rwX "$BUILDROOT/src"
         find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
         chmod +x "$BUILDROOT/src/ci/qemu-mode-smoke.sh" "$BUILDROOT/src/tools/fetch-limine.sh" "$BUILDROOT/src/tools/privora-boot-core-build.sh"
         echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
-        echo 'PASS: exact Privora RC4 v39 Rev5 hardware-readiness-runtime source selected'
+        echo 'PASS: exact Privora RC4 v39 Rev7 certification-marker-broker source selected'
 
     - name: Download exact ISO candidate from build job
       uses: actions/download-artifact@v8
@@ -378,7 +446,7 @@ jobs:
         path: ${{ runner.temp }}/privora-build/output
     - name: Verify downloaded candidate identity
       shell: bash
-      run: "set -euxo pipefail\nISO=\"$BUILDROOT/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso\"\ntest -s \"$ISO\"\nsha256sum \"$ISO\" | tee \"$BUILDROOT/output/REUSED-ISO-SHA256.txt\"\n{\n  echo \"Privora 4.0 RC4 v39 Rev5 — Hardware Readiness Runtime Certification\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n  echo \"iso_bytes=$(stat -c %s \"$ISO\")\"\n  echo \"iso_sha256=$(sha256sum \"$ISO\" | awk '{print $1}')\"\n  echo \"status=downloaded-and-verified\"\n} > \"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV5.txt\"\n"
+      run: "set -euxo pipefail\nISO=\"$BUILDROOT/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso\"\ntest -s \"$ISO\"\nsha256sum \"$ISO\" | tee \"$BUILDROOT/output/REUSED-ISO-SHA256.txt\"\n{\n  echo \"Privora 4.0 RC4 v39 Rev7 — Certification Marker Broker Runtime Certification\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n  echo \"iso_bytes=$(stat -c %s \"$ISO\")\"\n  echo \"iso_sha256=$(sha256sum \"$ISO\" | awk '{print $1}')\"\n  echo \"status=downloaded-and-verified\"\n} > \"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV7.txt\"\n"
     - name: Start Debian 13 certification container
       shell: bash
       run: |
@@ -392,7 +460,7 @@ jobs:
     - name: Configure certification environment
       shell: bash
       run: "set -euxo pipefail\ndocker exec -i privora-certifier bash -s <<'CONTAINER'\nset -euxo pipefail\napt-get update\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends   ca-certificates file xorriso squashfs-tools   qemu-system-x86 qemu-utils ovmf socat   python3 python3-pil e2fsprogs dosfstools mtools\napt-get clean\nrm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*\nCONTAINER\n"
-    - name: Verify finished v39 Rev5 ISO payload
+    - name: Verify finished v39 Rev7 ISO payload
       shell: bash
       run: |
         set -euxo pipefail
@@ -408,6 +476,8 @@ jobs:
           /live/initrd.img \
           /live/filesystem.squashfs \
           /boot/limine/limine.conf \
+          /EFI/BOOT/limine.conf \
+          /limine.conf \
           /boot/limine/limine-bios.sys \
           /boot/limine/limine-bios-cd.bin \
           /boot/limine/limine-uefi-cd.bin \
@@ -420,20 +490,28 @@ jobs:
 
         xorriso -osirrox on -indev "$ISO" \
           -extract /boot/limine/limine.conf "$check/limine.conf" >/dev/null 2>&1
-        echo '--- finished ISO Privora Boot Center 1.2 ---'
+        xorriso -osirrox on -indev "$ISO" \
+          -extract /EFI/BOOT/limine.conf "$check/limine-uefi.conf" >/dev/null 2>&1
+        xorriso -osirrox on -indev "$ISO" \
+          -extract /limine.conf "$check/limine-root.conf" >/dev/null 2>&1
+        cmp -s "$check/limine.conf" "$check/limine-uefi.conf"
+        cmp -s "$check/limine.conf" "$check/limine-root.conf"
+        echo '--- finished ISO Privora Boot Center 1.3 ---'
         cat "$check/limine.conf"
         echo '--- end Boot Center config ---'
 
-        grep -Fq '# PRIVORA BOOT CENTER 1.2' "$check/limine.conf"
+        grep -Fq '# PRIVORA BOOT CENTER 1.3' "$check/limine.conf"
         grep -Fq 'timeout: 30' "$check/limine.conf"
         grep -Fq 'default_entry: 2' "$check/limine.conf"
         grep -Fq 'graphics: yes' "$check/limine.conf"
         grep -Fq 'mouse: yes' "$check/limine.conf"
-        grep -Fq 'interface_resolution: 1920x1080' "$check/limine.conf"
+        grep -Fq 'interface_resolution: 1280x720' "$check/limine.conf"
         grep -Fq 'interface_help_hidden: yes' "$check/limine.conf"
-        grep -Fq 'term_font_scale: 6x4' "$check/limine.conf"
-        grep -Fq 'term_margin: 260' "$check/limine.conf"
-        grep -Fq 'term_margin_gradient: 24' "$check/limine.conf"
+        grep -Fq 'interface_help_colour: 071225' "$check/limine.conf"
+        ! grep -Eq '^comment:' "$check/limine.conf"
+        grep -Fq 'term_font_scale: 5x3' "$check/limine.conf"
+        grep -Fq 'term_margin: 96' "$check/limine.conf"
+        grep -Fq 'term_margin_gradient: 18' "$check/limine.conf"
         ! grep -Eq '^comment:' "$check/limine.conf"
 
         grep -Fq '/   Install Privora' "$check/limine.conf"
@@ -456,7 +534,7 @@ jobs:
 
         xorriso -osirrox on -indev "$ISO" \
           -extract /boot/privora/boot-center.png "$check/boot-center.png" >/dev/null 2>&1
-        file "$check/boot-center.png" | grep -Fq 'PNG image data, 1920 x 1080'
+        file "$check/boot-center.png" | grep -Fq 'PNG image data, 1280 x 720'
 
         xorriso -osirrox on -indev "$ISO" \
           -extract /EFI/BOOT/BOOTX64.EFI "$check/BOOTX64.EFI" >/dev/null 2>&1
@@ -464,7 +542,7 @@ jobs:
 
         xorriso -osirrox on -indev "$ISO" \
           -extract /boot/privora/BOOT-CORE-STATUS.txt "$check/boot-core-status.txt" >/dev/null 2>&1
-        grep -Fq 'privora-boot-center=1.2.0' "$check/boot-core-status.txt"
+        grep -Fq 'privora-boot-center=1.3.0' "$check/boot-core-status.txt"
         grep -Fq 'boot-core=limine-12.5.2' "$check/boot-core-status.txt"
 
         xorriso -osirrox on -indev "$ISO" \
@@ -492,7 +570,7 @@ jobs:
         done
 
         unsquashfs -cat "$check/filesystem.squashfs" \
-          usr/share/privora/boot-center/VERSION | grep -Fxq '1.2.0'
+          usr/share/privora/boot-center/VERSION | grep -Fxq '1.3.0'
 
         unsquashfs -cat "$check/filesystem.squashfs" \
           etc/privora/reconstruction > "$check/reconstruction.txt"
@@ -501,8 +579,8 @@ jobs:
         grep -Fq 'installed-boot-secureboot-foundation=v36' "$check/reconstruction.txt"
         grep -Fq 'consolidated-regression-recovery=v37' "$check/reconstruction.txt"
         grep -Fq 'boot-installer-visual-recovery=v38' "$check/reconstruction.txt"
-        grep -Fq 'prism-environment=1.3.1' "$check/reconstruction.txt"
-        grep -Fq 'privora-boot-center=1.2.0' "$check/reconstruction.txt"
+        grep -Fq 'privora-prism-native-runtime=1.4.0' "$check/reconstruction.txt"
+        grep -Fq 'privora-boot-center=1.3.0' "$check/reconstruction.txt"
 
         unsquashfs -cat "$check/filesystem.squashfs" \
           usr/bin/privora-prism-panel-ensure > "$check/panel-ensure"
@@ -524,11 +602,29 @@ jobs:
 
         unsquashfs -cat "$check/filesystem.squashfs" \
           usr/bin/privora-installer-launch > "$check/installer-launch"
-        grep -Fq 'native-default' "$check/installer-launch"
+        grep -Fq 'run_calamares' "$check/installer-launch"
+        grep -Fq 'PRIVORA_INSTALLER_CALAMARES_START' "$check/installer-launch"
+        grep -Fq 'privora-calamares-root' "$check/installer-launch"
         grep -Fq 'env -u GSK_RENDERER' "$check/installer-launch"
         grep -Fq 'run_first_party cairo' "$check/installer-launch"
         grep -Fq 'PRIVORA_INSTALLER_MAXIMIZED' "$check/installer-launch"
         grep -Fq 'PRIVORA_INSTALLER_READY' "$check/installer-launch"
+        unsquashfs -cat "$check/filesystem.squashfs" \
+          usr/lib/privora/installer/privora-calamares-root > "$check/calamares-root"
+        grep -Fq 'QT_QPA_PLATFORM=xcb' "$check/calamares-root"
+        grep -Fq 'unset WAYLAND_DISPLAY' "$check/calamares-root"
+
+        unsquashfs -cat "$check/filesystem.squashfs" \
+          usr/bin/privora-prism-mode-guardian > "$check/mode-guardian"
+        grep -Fq 'privora-$mode-mode.lock' "$check/mode-guardian"
+        grep -Fq 'PRIVORA_INSTALLER_SESSION_GUARDIAN_READY' "$check/mode-guardian"
+
+        unsquashfs -cat "$check/filesystem.squashfs" \
+          usr/bin/privora-prism-panel-ensure > "$check/panel-ensure"
+        grep -Fq 'panelCount === 2' "$check/panel-ensure"
+        grep -Fq 'command-rail' "$check/panel-ensure"
+        grep -Fq 'launcher-dock' "$check/panel-ensure"
+
 
         unsquashfs -cat "$check/filesystem.squashfs" \
           usr/lib/privora/privora-console-font-early > "$check/console-font"
@@ -554,6 +650,9 @@ jobs:
         grep -Fq 'privora_set_progress(0.03)' "$check/plymouth.script"
         grep -Fq 'if (!is_boot) return;' "$check/plymouth.script"
         grep -Fq 'if (is_boot) privora_set_progress(1);' "$check/plymouth.script"
+        grep -Fq 'privora_set_progress(0.08)' "$check/plymouth.script"
+        for pct in 30 60 85 100; do grep -Fq "PRIVORA_PROGRESS:$pct" "$check/plymouth.script"; done
+        grep -Fq 'Intentionally ignore estimated duration progress' "$check/plymouth.script"
         ! grep -Fq 'mode == "boot-up"' "$check/plymouth.script"
         ! grep -Fq 'progress = 1.0' "$check/plymouth.script"
 
@@ -562,6 +661,31 @@ jobs:
         grep -Fq 'Privora Boot Center' "$check/installed-boot"
         grep -Fq 'GRUB' "$check/installed-boot"
         grep -Fq 'secureboot-integrity-ready' "$check/installed-boot"
+
+        # Rev7 root-owned graphical certification marker channel.
+        for path in \
+          usr/bin/privora-cert-signal \
+          usr/lib/privora/privora-certification-broker \
+          usr/lib/systemd/system/privora-certification-broker.service \
+          usr/lib/systemd/system/privora-graphical-target-marker.service \
+          etc/systemd/system/multi-user.target.wants/privora-certification-broker.service \
+          etc/systemd/system/graphical.target.wants/privora-graphical-target-marker.service; do
+          grep -Fq "$path" "$check/squashfs-listing.txt"
+        done
+
+        unsquashfs -cat "$check/filesystem.squashfs" \
+          usr/bin/privora-cert-signal > "$check/cert-signal"
+        unsquashfs -cat "$check/filesystem.squashfs" \
+          usr/lib/privora/privora-certification-broker > "$check/cert-broker"
+        unsquashfs -cat "$check/filesystem.squashfs" \
+          usr/lib/systemd/system/privora-certification-broker.service > "$check/cert-broker.service"
+        grep -Fq "^PRIVORA_[A-Z0-9_]+$" "$check/cert-signal"
+        grep -Fq 'set -C' "$check/cert-signal"
+        ! grep -Fq '/dev/ttyS0' "$check/cert-signal"
+        grep -Fq '/dev/ttyS0' "$check/cert-broker"
+        grep -Fq 'chmod 1733' "$check/cert-broker"
+        grep -Fq 'Before=display-manager.service sddm.service graphical.target' "$check/cert-broker.service"
+        grep -Fq 'ConditionKernelCommandLine=boot=live' "$check/cert-broker.service"
 
         # v39 hardware and daily-driver reliability payload.
         for path in \
@@ -632,6 +756,8 @@ jobs:
         grep -Fq 'regression-audit-hotfix=v39-rev2' "$check/reconstruction.txt"
         grep -Fq 'systemd-build-context-hotfix=v39-rev3' "$check/reconstruction.txt"
         grep -Fq 'hardware-readiness-runtime-hotfix=v39-rev5' "$check/reconstruction.txt"
+        grep -Fq 'boot-installer-prism-runtime-recovery=v39-rev6' "$check/reconstruction.txt"
+        grep -Fq 'certification-marker-broker=v39-rev7' "$check/reconstruction.txt"
 
         # Rev2 semantic hardware fixes must exist in the actual SquashFS.
         grep -Fq 'def run_result' "$check/privora_hardware.py"
@@ -657,10 +783,10 @@ jobs:
         grep -Eq 'UEFI|EFI' "$check/el-torito.txt"
         grep -Eq 'MBR|Protective' "$check/system-area.txt"
 
-        echo 'PASS: final ISO contains v39 Rev5 hardware-readiness runtime fix, audited hardware, mapped-frame installer readiness, Boot Center 1.2, Prism 1.3.1, recovery and console contracts'
+        echo 'PASS: final ISO contains v39 Rev7 root-owned certification signaling plus Rev6 Boot Center 1.3, Calamares, Prism 1.4, milestone splash progress, hardware readiness, recovery and console contracts'
         CONTAINER
 
-    - name: Capture Privora Boot Center 1.2 visual evidence
+    - name: Capture Privora Boot Center 1.3 visual evidence
       if:
       continue-on-error: true
       shell: bash
@@ -669,9 +795,9 @@ jobs:
         docker exec -i privora-certifier bash -s <<'CONTAINER'
         set -euxo pipefail
         ISO=/work/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso
-        MON=/tmp/privora-v39-rev3-monitor.sock
-        PPM=/work/output/PRIVORA-BOOT-CENTER-v39-REV3.ppm
-        PNG=/work/output/PRIVORA-BOOT-CENTER-v39-REV3.png
+        MON=/tmp/privora-v39-rev7-monitor.sock
+        PPM=/work/output/PRIVORA-BOOT-CENTER-v39-REV7.ppm
+        PNG=/work/output/PRIVORA-BOOT-CENTER-v39-REV7.png
         rm -f "$MON" "$PPM" "$PNG"
 
         qemu-system-x86_64 \
@@ -680,7 +806,7 @@ jobs:
           -monitor "unix:$MON,server=on,wait=off" \
           -drive "if=none,id=privora_live,format=raw,readonly=on,file=$ISO" \
           -device "virtio-blk-pci,drive=privora_live,bootindex=1" \
-          >/tmp/privora-v39-rev3-qemu.out 2>/tmp/privora-v39-rev3-qemu.err &
+          >/tmp/privora-v39-rev7-qemu.out 2>/tmp/privora-v39-rev7-qemu.err &
         pid=$!
         trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f "$MON"' EXIT
 
@@ -700,7 +826,7 @@ jobs:
         if im.width < 640 or im.height < 400 or dynamic < 24:
             raise SystemExit(f'Boot Center screenshot lacks expected visual signal: size={im.size} dynamic={dynamic}')
         im.save(dst)
-        print(f'PASS: Privora Boot Center 1.2 screenshot captured size={im.size} dynamic={dynamic}')
+        print(f'PASS: Privora Boot Center 1.3 screenshot captured size={im.size} dynamic={dynamic}')
         PY
         rm -f "$PPM"
         CONTAINER
@@ -718,19 +844,22 @@ jobs:
         QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
         QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
 
+        QEMU_MODE_TIMEOUT_SCREENSHOT=/work/output/PRIVORA-LIVE-TIMEOUT-v39-REV7.png \
         QEMU_MODE_TIMEOUT=420 ./ci/qemu-mode-smoke.sh "$ISO" live PRIVORA_PRISM_READY
-        QEMU_MODE_SCREENSHOT=/work/output/PRIVORA-INSTALLER-v39-REV3.png \
+        QEMU_MODE_SCREENSHOT=/work/output/PRIVORA-INSTALLER-v39-REV7.png \
+        QEMU_MODE_TIMEOUT_SCREENSHOT=/work/output/PRIVORA-INSTALLER-TIMEOUT-v39-REV7.png \
         QEMU_MODE_TIMEOUT=420 \
         ./ci/qemu-mode-smoke.sh "$ISO" install PRIVORA_INSTALLER_READY
+        QEMU_MODE_TIMEOUT_SCREENSHOT=/work/output/PRIVORA-RECOVERY-TIMEOUT-v39-REV7.png \
         QEMU_MODE_TIMEOUT=360 ./ci/qemu-mode-smoke.sh "$ISO" recovery PRIVORA_RECOVERY_READY
         QEMU_MODE_TIMEOUT=240 ./ci/qemu-mode-smoke.sh "$ISO" console PRIVORA_CONSOLE_READY
 
         QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
 
-        cat > /work/output/CERTIFICATION-v39-REV3.txt <<'EOF'
-        Privora 4.0 RC4 v39 Rev3 — systemd Build-Context Hotfix
-        Privora Boot Center 1.2
-        Privora Prism Environment 1.3.1
+        cat > /work/output/CERTIFICATION-v39-REV7.txt <<'EOF'
+        Privora 4.0 RC4 v39 Rev7 — Certification Marker Broker
+        Privora Boot Center 1.3
+        Privora Prism Environment 1.4.0
         Boot core: Limine 12.5.2
 
         v34 Limine C-toolchain preflight: PASS
@@ -741,14 +870,20 @@ jobs:
         v39 hardware readiness service/payload: PASS
         v39 Rev2 regression/source audit: PASS
         v39 Rev3 systemd build-context hotfix: PASS
+        v39 Rev5 hardware-readiness runtime hotfix: PASS
+        v39 Rev6 boot/installer/Prism runtime recovery: PASS
+        v39 Rev7 root-owned certification marker broker: PASS
+        Systemd-milestone startup progress contract: PASS
+        Calamares production installer surface: PASS
+        Prism 1.4 shell contract: PASS
         GTK mapped-frame installer readiness contract: PASS
         Install framebuffer non-black visual gate: PASS
         Finished ISO Boot Center payload: PASS
         BIOS Limine ISO-hybrid live boot: PASS
         UEFI Limine ISO-hybrid live boot: PASS
-        Live Prism mode marker: PASS
-        Install mode / mapped-frame installer marker: PASS
-        Recovery mode marker: PASS
+        Live Prism mode marker via root broker: PASS
+        Install mode / mapped-frame installer marker via root broker: PASS
+        Recovery mode marker via root broker: PASS
         Console mode marker: PASS
         Disposable install/write: PASS
         Installed-system boot marker: PASS
@@ -760,39 +895,38 @@ jobs:
     - name: Bind certification to immutable candidate
       if: always()
       shell: bash
-      run: "if [ -f \"$BUILDROOT/output/CERTIFICATION-v39-REV3.txt\" ] && [ ! -f \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\" ]; then\n  cp \"$BUILDROOT/output/CERTIFICATION-v39-REV3.txt\" \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\"\nfi\nset +e\nSTATUS=\"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV5.txt\"\nmkdir -p \"$BUILDROOT/output\"\ntouch \"$STATUS\"\n{\n  echo \"finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"job_status=${{ job.status }}\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n} >> \"$STATUS\"\n\nif [ -f \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\" ]; then\n  {\n    echo\n    echo \"Immutable GitHub candidate:\"\n    echo \"Artifact ID: ${{ needs.build_iso.outputs.candidate_id }}\"\n    echo \"Artifact digest: ${{ needs.build_iso.outputs.candidate_digest }}\"\n    echo \"Artifact URL: ${{ needs.build_iso.outputs.candidate_url }}\"\n  } >> \"$BUILDROOT/output/CERTIFICATION-v39-REV5.txt\"\nfi\n"
+      run: "set +e\nSTATUS=\"$BUILDROOT/output/CERTIFICATION-STATUS-v39-REV7.txt\"\nmkdir -p \"$BUILDROOT/output\"\ntouch \"$STATUS\"\n{\n  echo \"finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)\"\n  echo \"job_status=${{ job.status }}\"\n  echo \"candidate_artifact_id=${{ needs.build_iso.outputs.candidate_id }}\"\n  echo \"candidate_artifact_digest=${{ needs.build_iso.outputs.candidate_digest }}\"\n  echo \"candidate_artifact_url=${{ needs.build_iso.outputs.candidate_url }}\"\n} >> \"$STATUS\"\n\nif [ -f \"$BUILDROOT/output/CERTIFICATION-v39-REV7.txt\" ]; then\n  {\n    echo\n    echo \"Immutable GitHub candidate:\"\n    echo \"Artifact ID: ${{ needs.build_iso.outputs.candidate_id }}\"\n    echo \"Artifact digest: ${{ needs.build_iso.outputs.candidate_digest }}\"\n    echo \"Artifact URL: ${{ needs.build_iso.outputs.candidate_url }}\"\n  } >> \"$BUILDROOT/output/CERTIFICATION-v39-REV7.txt\"\nfi\n"
     - name: Add Windows USB instructions
       if: success()
       shell: bash
       run: |
         cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'EOF'
-        Privora 4.0 RC4 v39 Rev3 — systemd Build-Context Hotfix — Prism 1.3.1
+        Privora 4.0 RC4 v39 Rev7 — Boot Center 1.3 — Prism 1.4.0
 
         1. Verify the ISO against SHA256SUMS.txt.
-        2. Open Rufus on Windows and select Privora-4.0-rc4-Installer-privora-standard-amd64.iso.
-        3. Write the image to the USB drive; the selected USB is erased.
-        4. Boot the computer from the USB.
-        5. Privora Boot Center 1.2 is the primary BIOS/UEFI startup interface.
-        6. The selector is deliberately enlarged and positioned inside the central graphical panel.
-        7. Try Privora Live is the 30-second default.
-        8. Install, Live, Recovery and Terminal/Console are independently certified boot modes.
-        9. Console mode intentionally disables Plymouth and keeps verbose kernel/systemd output visible into the prompt.
-        10. Live normally autologs into Privora Prism; fallback Live credentials are user `privora`, password `live`.
-        11. Startup uses the Privora splash WITH the progress bar and completes it at graphical handoff.
-        12. Restart/shutdown use the same Privora artwork WITHOUT the boot progress bar.
-        13. Prism 1.3.1 uses the Privora P on the native application launcher; ordinary first-party apps use distinct icons.
-        14. v36 stages installed Privora Boot Center on UEFI while retaining GRUB as a recovery fallback.
-        15. Privora Hardware Readiness scans devices locally and uploads nothing.
-        16. Firmware/driver pages are informational by default and do not silently flash firmware or replace a working driver.
-        17. This development image does not claim production Secure Boot certification.
+        2. Write Privora-4.0-rc4-Installer-privora-standard-amd64.iso to USB with Rufus in image mode.
+        3. Boot the computer from the USB.
+        4. Privora Boot Center 1.3 is the primary BIOS/UEFI interface.
+        5. Its actual Limine selector is configured at 1280x720 with 5x3 typography inside the designed terminal panel.
+        6. Try Live is the 30-second default.
+        7. Install, Live, Recovery and Console are distinct boot modes.
+        8. Install mode is captured before SDDM and launched by the Privora session guardian.
+        9. Calamares is the production installer surface; the custom GTK installer is a fallback.
+        10. Startup splash progress follows current systemd milestones and reaches 100% at graphical handoff.
+        11. Shutdown/restart use the Privora splash without a progress bar.
+        12. Prism 1.4 pre-seeds and reapplies the Privora global theme and requires the Privora two-panel shell layout.
+        13. Console mode disables Plymouth and preserves verbose boot output into the prompt.
+        14. Live fallback credentials remain user `privora`, password `live`.
+        15. Hardware Readiness is local/advisory and firmware/driver pages do not silently modify hardware.
+        16. Production Secure Boot trust/signing is not certified in this development image.
         EOF
 
     - name: Upload certification reports and visual evidence
       if: always()
       uses: actions/upload-artifact@v7
       with:
-        name: Privora-4.0-RC4-v39-Rev5-Certification-Evidence
-        path: "${{ runner.temp }}/privora-build/output/CERTIFICATION-STATUS-v39-REV5.txt\n${{ runner.temp }}/privora-build/output/CERTIFICATION-v39-REV5.txt\n${{ runner.temp }}/privora-build/output/PRIVORA-BOOT-CENTER-v39-REV3.png\n${{ runner.temp }}/privora-build/output/PRIVORA-INSTALLER-v39-REV3.png\n${{ runner.temp }}/privora-build/output/REUSED-ISO-SHA256.txt\n${{ runner.temp }}/privora-build/output/SHA256SUMS.txt\n${{ runner.temp }}/privora-build/output/FLASH-TO-USB-WINDOWS.txt\n"
+        name: Privora-4.0-RC4-v39-Rev7-Certification-Evidence
+        path: "${{ runner.temp }}/privora-build/output/CERTIFICATION-STATUS-v39-REV7.txt\n${{ runner.temp }}/privora-build/output/CERTIFICATION-v39-REV7.txt\n${{ runner.temp }}/privora-build/output/PRIVORA-BOOT-CENTER-v39-REV7.png\n${{ runner.temp }}/privora-build/output/PRIVORA-INSTALLER-v39-REV7.png\n${{ runner.temp }}/privora-build/output/PRIVORA-LIVE-TIMEOUT-v39-REV7.png\n${{ runner.temp }}/privora-build/output/PRIVORA-INSTALLER-TIMEOUT-v39-REV7.png\n${{ runner.temp }}/privora-build/output/PRIVORA-RECOVERY-TIMEOUT-v39-REV7.png\n${{ runner.temp }}/privora-build/output/REUSED-ISO-SHA256.txt\n${{ runner.temp }}/privora-build/output/SHA256SUMS.txt\n${{ runner.temp }}/privora-build/output/FLASH-TO-USB-WINDOWS.txt\n"
         if-no-files-found: warn
         retention-days: 30
         compression-level: 6
