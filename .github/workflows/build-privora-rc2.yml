@@ -1,7 +1,16 @@
-name: Build Privora 4.0 RC4 v33 — Privora Boot Center 1.0 & Modern Boot Core
+name: Build Privora 4.0 RC4 — Consolidated Boot, Desktop & Recovery v37
 
 on:
   workflow_dispatch:
+    inputs:
+      certification:
+        description: Certification depth after the ISO is preserved
+        required: true
+        default: full
+        type: choice
+        options:
+          - full
+          - build-only
 
 permissions:
   contents: read
@@ -9,7 +18,7 @@ permissions:
 jobs:
   installer-amd64:
     runs-on: ubuntu-latest
-    timeout-minutes: 180
+    timeout-minutes: 210
 
     steps:
       - name: Check out repository
@@ -25,28 +34,28 @@ jobs:
           sudo apt-get clean || true
           df -h /
 
-      - name: Select exact Privora RC4 v33 source
+      - name: Select exact Privora RC4 v37 source
         shell: bash
         run: |
           set -euxo pipefail
-          EXPECTED_SHA256='b28914c385d3c5e94f46f6e51928825537dc9d7aa2dbb9fbab5043d14157f8d5'
-          EXPECTED_NAME='Privora-4.0-RC4-Privora-Boot-Center-v33-Web-Source.zip'
+          EXPECTED_SHA256='31c95f6d4eb01f08ea99db2755f84e8251a8f877a84e883d186fde5e6cb4da11'
+          EXPECTED_NAME='Privora-4.0-RC4-Consolidated-Experience-v37-Web-Source.zip'
 
           SOURCE_ZIP=$(find . -maxdepth 3 -type f -name "$EXPECTED_NAME" -print -quit)
           if [ -z "$SOURCE_ZIP" ]; then
             echo "ERROR: $EXPECTED_NAME is not present in the repository." >&2
             find . -maxdepth 3 -type f -printf '%p\n' | sort | head -n 400 >&2
-            exit 33
+            exit 37
           fi
 
           actual=$(sha256sum "$SOURCE_ZIP" | awk '{print $1}')
           echo "source=$SOURCE_ZIP"
           echo "sha256=$actual"
           if [ "$actual" != "$EXPECTED_SHA256" ]; then
-            echo 'ERROR: RC4 v33 source checksum mismatch.' >&2
+            echo 'ERROR: RC4 v37 source checksum mismatch.' >&2
             echo "Expected: $EXPECTED_SHA256" >&2
             echo "Actual:   $actual" >&2
-            exit 34
+            exit 38
           fi
 
           unzip -t "$SOURCE_ZIP" >/dev/null
@@ -56,22 +65,28 @@ jobs:
           unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
 
           test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc4'
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.2.1'
-          test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.0.0'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.3.0'
+          test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.1.0'
           grep -Fq 'Limine 12.5.2' "$BUILDROOT/src/boot/privora-boot-center/CORE-VERSION"
           grep -Fq '5e2d6eb86623fcdcd2a873c9eca7dcafccb34182c17779535fe824fd57b688c5' "$BUILDROOT/src/boot/privora-boot-center/UPSTREAM-SHA256"
-          grep -Fq 'privora-boot-center=1.0.0' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
-          grep -Fq 'boot-core=limine-12.5.2' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          grep -Fq 'limine-toolchain-hotfix=v34' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          grep -Fq 'end-to-end-experience-certification=v35' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          grep -Fq 'installed-boot-secureboot-foundation=v36' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          grep -Fq 'consolidated-regression-recovery=v37' "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
           test -x "$BUILDROOT/src/tools/fetch-limine.sh"
           test -x "$BUILDROOT/src/tools/privora-boot-core-build.sh"
-          test -f "$BUILDROOT/src/tests/privora-boot-center-test.py"
-          test -f "$BUILDROOT/src/release/RC4-PRIVORA-BOOT-CENTER-v33.md"
-          test -f "$BUILDROOT/src/release/RC4-PRIVORA-BOOT-CENTER-v33-VALIDATION.txt"
+          test -x "$BUILDROOT/src/ci/qemu-mode-smoke.sh"
+          test -f "$BUILDROOT/src/tests/rc4-v37-consolidated-experience-test.py"
+          test -f "$BUILDROOT/src/release/RC4-v37-CONSOLIDATED-BOOT-DESKTOP-RECOVERY.md"
+          test -f "$BUILDROOT/src/release/RC4-v37-CONSOLIDATED-VALIDATION.txt"
 
           chmod -R u+rwX "$BUILDROOT/src"
           find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
+          chmod +x "$BUILDROOT/src/ci/qemu-mode-smoke.sh" \
+            "$BUILDROOT/src/tools/fetch-limine.sh" \
+            "$BUILDROOT/src/tools/privora-boot-core-build.sh"
           echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
-          echo 'PASS: exact Privora RC4 v33 source selected'
+          echo 'PASS: exact Privora RC4 v37 source selected'
 
       - name: Start Debian 13 build container
         shell: bash
@@ -115,25 +130,19 @@ jobs:
             command -v "$tool" >/dev/null || { echo "Missing build tool: $tool" >&2; exit 127; }
           done
 
-          # Limine's binary release includes a small host installer that must be
-          # compiled locally. gcc alone is not enough; libc development headers
-          # (including stdio.h) must be present.
+          # v34: fail cheaply if Limine's host utility cannot compile.
           test -r /usr/include/stdio.h || {
             echo 'ERROR: C development headers are missing (/usr/include/stdio.h).' >&2
             exit 125
           }
-
           cat > /tmp/privora-c-toolchain-test.c <<'C'
           #include <stdio.h>
-          int main(void) {
-              puts("PRIVORA_C_TOOLCHAIN_OK");
-              return 0;
-          }
+          int main(void) { puts("PRIVORA_C_TOOLCHAIN_OK"); return 0; }
           C
           gcc /tmp/privora-c-toolchain-test.c -o /tmp/privora-c-toolchain-test
           /tmp/privora-c-toolchain-test | grep -Fxq 'PRIVORA_C_TOOLCHAIN_OK'
           rm -f /tmp/privora-c-toolchain-test.c /tmp/privora-c-toolchain-test
-          echo 'PASS: C compiler + libc development headers are ready for Limine'
+          echo 'PASS: v34 C compiler + libc development headers are ready for Limine'
           CONTAINER
 
       - name: Fetch and verify pinned Privora Boot Core
@@ -152,7 +161,7 @@ jobs:
           echo "PASS: pinned Limine 12.5.2 boot core fetched and checksum verified: $LIMINE_DIR"
           CONTAINER
 
-      - name: Validate RC4 v33 permanent source for v34 build
+      - name: Validate RC4 v37 permanent source
         shell: bash
         run: |
           set -euxo pipefail
@@ -160,11 +169,12 @@ jobs:
           set -euxo pipefail
           cd /work/src
           ./ci/validate-rc4-unified.sh
+          bash -n ci/qemu-mode-smoke.sh
           rm -rf release/.deb-work release/debs prism/.build prism/dist
           find . -type d -name __pycache__ -prune -exec rm -rf {} +
           CONTAINER
 
-      - name: Build Privora RC4 v33 Boot Center ISO
+      - name: Build Privora RC4 v37 ISO
         shell: bash
         run: |
           set -euxo pipefail
@@ -180,7 +190,8 @@ jobs:
           cd /work/output
           sha256sum Privora-4.0-rc4-Installer-privora-standard-amd64.iso > SHA256SUMS.txt
           cp /work/src/RECONSTRUCTION-PROVENANCE.md .
-          cp /work/src/release/RC4-PRIVORA-BOOT-CENTER-v33-VALIDATION.txt .
+          cp /work/src/release/RC4-v37-CONSOLIDATED-VALIDATION.txt .
+          cp /work/src/release/RC4-v37-CONSOLIDATED-BOOT-DESKTOP-RECOVERY.md .
           cd /work/src/distro
           lb clean --purge || true
           rm -rf chroot binary cache .build || true
@@ -189,13 +200,13 @@ jobs:
       - name: Preserve ISO immediately after successful build
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC4-v34-Boot-Center-ISO-Candidate-Uncertified
+          name: Privora-4.0-RC4-v37-ISO-Candidate-Uncertified
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 30
           compression-level: 0
 
-      - name: Verify finished RC4 v33 Privora Boot Center ISO
+      - name: Verify finished RC4 v37 ISO
         shell: bash
         run: |
           set -euxo pipefail
@@ -222,25 +233,23 @@ jobs:
           done
 
           xorriso -osirrox on -indev "$ISO" -extract /boot/limine/limine.conf "$check/limine.conf" >/dev/null 2>&1
-          echo '--- finished ISO Privora Boot Center 1.0 ---'
+          echo '--- finished ISO Privora Boot Center 1.1 ---'
           cat "$check/limine.conf"
           echo '--- end Boot Center config ---'
           grep -Fq 'timeout: 30' "$check/limine.conf"
-          grep -Fq 'default_entry: Try Privora Live' "$check/limine.conf"
+          grep -Fq 'default_entry: 2' "$check/limine.conf"
           grep -Fq 'graphics: yes' "$check/limine.conf"
           grep -Fq 'mouse: yes' "$check/limine.conf"
-          grep -Fq 'interface_resolution: 1280x720' "$check/limine.conf"
-          grep -Fq 'BOOT CENTER 1.0' "$check/limine.conf"
-          grep -Fq 'term_font_scale: 2x2' "$check/limine.conf"
-          grep -Fq '/ Install Privora' "$check/limine.conf"
-          grep -Fq '/ Try Privora Live' "$check/limine.conf"
-          grep -Fq '/ Privora Recovery & Repair' "$check/limine.conf"
-          grep -Fq '/ Privora Terminal / Console' "$check/limine.conf"
-          grep -Fq '/ Advanced Options' "$check/limine.conf"
-          grep -Fq '// Install Privora - Compatibility Mode' "$check/limine.conf"
-          grep -Fq '// Try Privora with Persistence' "$check/limine.conf"
-          grep -Fq '// Privora Safe Graphics' "$check/limine.conf"
-          grep -Fq '// Privora Accessibility' "$check/limine.conf"
+          grep -Fq 'interface_resolution: 1920x1080' "$check/limine.conf"
+          grep -Fq 'BOOT CENTER 1.1' "$check/limine.conf"
+          grep -Fq 'term_font_scale: 4x3' "$check/limine.conf"
+          grep -Fq 'term_margin: 220' "$check/limine.conf"
+          grep -Fq '/             Install Privora' "$check/limine.conf"
+          grep -Fq '/             Try Privora Live' "$check/limine.conf"
+          grep -Fq '/             Privora Recovery & Repair' "$check/limine.conf"
+          grep -Fq '/             Privora Terminal / Console' "$check/limine.conf"
+          grep -Fq '/             Advanced Options' "$check/limine.conf"
+          grep -Fq 'privora.mode=install' "$check/limine.conf"
           grep -Fq 'privora.mode=recovery privora.recovery=1' "$check/limine.conf"
           grep -Fq 'privora.mode=console systemd.unit=multi-user.target' "$check/limine.conf"
           grep -Fq 'plymouth.enable=0' "$check/limine.conf"
@@ -253,37 +262,64 @@ jobs:
           xorriso -osirrox on -indev "$ISO" -extract /EFI/BOOT/BOOTX64.EFI "$check/BOOTX64.EFI" >/dev/null 2>&1
           file "$check/BOOTX64.EFI" | grep -Ei 'PE32\+|EFI application'
           xorriso -osirrox on -indev "$ISO" -extract /boot/privora/BOOT-CORE-STATUS.txt "$check/boot-core-status.txt" >/dev/null 2>&1
-          grep -Fq 'privora-boot-center=1.0.0' "$check/boot-core-status.txt"
+          grep -Fq 'privora-boot-center=1.1.0' "$check/boot-core-status.txt"
           grep -Fq 'boot-core=limine-12.5.2' "$check/boot-core-status.txt"
-          grep -Fq 'secure-boot=unsigned-development' "$check/boot-core-status.txt"
 
           xorriso -osirrox on -indev "$ISO" -extract /live/filesystem.squashfs "$check/filesystem.squashfs" >/dev/null 2>&1
           unsquashfs -ll "$check/filesystem.squashfs" > "$check/squashfs-listing.txt"
           for path in \
+            usr/bin/privora-prism-session \
             usr/bin/privora-prism-mode-dispatch \
             usr/bin/privora-prism-panel-ensure \
-            usr/lib/privora/privora-live-account-prepare \
+            usr/bin/privora-installer-launch \
+            usr/sbin/privora-installed-boot-setup \
+            usr/bin/privora-secureboot-status \
+            usr/lib/privora/privora-console-prepare \
             usr/lib/systemd/system-generators/privora-console-generator \
             usr/share/sddm/faces/privora.face.icon \
             usr/share/privora/boot-center/VERSION \
-            usr/share/privora/boot-center/limine.conf; do
+            usr/share/privora/boot-center/limine.conf \
+            usr/share/plymouth/themes/privora/privora.script; do
             grep -Fq "$path" "$check/squashfs-listing.txt"
           done
-          unsquashfs -cat "$check/filesystem.squashfs" usr/share/privora/boot-center/VERSION | grep -Fxq '1.0.0'
+
+          unsquashfs -cat "$check/filesystem.squashfs" usr/share/privora/boot-center/VERSION | grep -Fxq '1.1.0'
           unsquashfs -cat "$check/filesystem.squashfs" etc/privora/reconstruction > "$check/reconstruction.txt"
-          grep -Fq 'privora-boot-center=1.0.0' "$check/reconstruction.txt"
-          grep -Fq 'boot-core=limine-12.5.2' "$check/reconstruction.txt"
-          grep -Fq 'futuristic-boot-distinct-modes=v32' "$check/reconstruction.txt"
+          grep -Fq 'limine-toolchain-hotfix=v34' "$check/reconstruction.txt"
+          grep -Fq 'end-to-end-experience-certification=v35' "$check/reconstruction.txt"
+          grep -Fq 'installed-boot-secureboot-foundation=v36' "$check/reconstruction.txt"
+          grep -Fq 'consolidated-regression-recovery=v37' "$check/reconstruction.txt"
+          grep -Fq 'prism-environment=1.3.0' "$check/reconstruction.txt"
+          grep -Fq 'privora-boot-center=1.1.0' "$check/reconstruction.txt"
+
+          unsquashfs -cat "$check/filesystem.squashfs" usr/bin/privora-prism-panel-ensure > "$check/panel-ensure"
+          ! grep -Fq 'org.kde.plasma.icon' "$check/panel-ensure"
+          ! grep -Fq 'applications:' "$check/panel-ensure"
+          grep -Eq 'org\.kde\.plasma\.(kickoff|kicker)' "$check/panel-ensure"
+
+          unsquashfs -cat "$check/filesystem.squashfs" usr/lib/privora/privora-console-prepare > "$check/console-prepare"
+          grep -Fq 'setfont -C /dev/tty1' "$check/console-prepare"
+          ! grep -Fq 'Debian' "$check/console-prepare"
+
+          unsquashfs -cat "$check/filesystem.squashfs" usr/share/plymouth/themes/privora/privora.script > "$check/plymouth.script"
+          grep -Fq 'is_boot' "$check/plymouth.script"
+          grep -Fq 'progress = 1.0' "$check/plymouth.script"
+
+          unsquashfs -cat "$check/filesystem.squashfs" usr/sbin/privora-installed-boot-setup > "$check/installed-boot"
+          grep -Fq 'Privora Boot Center' "$check/installed-boot"
+          grep -Fq 'GRUB' "$check/installed-boot"
+          grep -Fq 'secureboot-integrity-ready' "$check/installed-boot"
 
           xorriso -indev "$ISO" -report_el_torito plain | tee "$check/el-torito.txt"
           xorriso -indev "$ISO" -report_system_area plain | tee "$check/system-area.txt"
           grep -Fq 'BIOS' "$check/el-torito.txt"
           grep -Eq 'UEFI|EFI' "$check/el-torito.txt"
           grep -Eq 'MBR|Protective' "$check/system-area.txt"
-          echo 'PASS: final ISO uses Privora Boot Center 1.0 / Limine as the BIOS+UEFI media boot core'
+          echo 'PASS: final ISO contains v34 toolchain lineage, v35 mode hooks, v36 installed-boot foundation, and v37 Boot Center/Prism recovery payload'
           CONTAINER
 
       - name: Install QEMU certification tools
+        if: ${{ inputs.certification == 'full' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -295,7 +331,8 @@ jobs:
           rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
           CONTAINER
 
-      - name: Capture Privora Boot Center 1.0 visual evidence
+      - name: Capture Privora Boot Center 1.1 visual evidence
+        if: ${{ inputs.certification == 'full' }}
         continue-on-error: true
         shell: bash
         run: |
@@ -303,9 +340,9 @@ jobs:
           docker exec -i privora-builder bash -s <<'CONTAINER'
           set -euxo pipefail
           ISO=/work/output/Privora-4.0-rc4-Installer-privora-standard-amd64.iso
-          MON=/tmp/privora-v33-monitor.sock
-          PPM=/work/output/PRIVORA-BOOT-CENTER-v33.ppm
-          PNG=/work/output/PRIVORA-BOOT-CENTER-v33.png
+          MON=/tmp/privora-v37-monitor.sock
+          PPM=/work/output/PRIVORA-BOOT-CENTER-v37.ppm
+          PNG=/work/output/PRIVORA-BOOT-CENTER-v37.png
           rm -f "$MON" "$PPM" "$PNG"
 
           qemu-system-x86_64 \
@@ -314,19 +351,19 @@ jobs:
             -monitor "unix:$MON,server=on,wait=off" \
             -drive "if=none,id=privora_live,format=raw,readonly=on,file=$ISO" \
             -device "virtio-blk-pci,drive=privora_live,bootindex=1" \
-            >/tmp/privora-v33-qemu.out 2>/tmp/privora-v33-qemu.err &
+            >/tmp/privora-v37-qemu.out 2>/tmp/privora-v37-qemu.err &
           pid=$!
           trap 'kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true; rm -f "$MON"' EXIT
 
           for _ in $(seq 1 30); do [ -S "$MON" ] && break; sleep 0.2; done
           test -S "$MON"
-          sleep 6
+          sleep 7
           printf 'screendump %s\n' "$PPM" | socat - UNIX-CONNECT:"$MON"
           for _ in $(seq 1 20); do [ -s "$PPM" ] && break; sleep 0.2; done
           test -s "$PPM"
 
           python3 - "$PPM" "$PNG" <<'PY'
-          from PIL import Image, ImageStat
+          from PIL import Image
           import sys
           src,dst=sys.argv[1:]
           im=Image.open(src).convert('RGB')
@@ -334,22 +371,23 @@ jobs:
           if im.width < 640 or im.height < 400 or dynamic < 24:
               raise SystemExit(f'Boot Center screenshot lacks expected visual signal: size={im.size} dynamic={dynamic}')
           im.save(dst)
-          print(f'PASS: Privora Boot Center screenshot captured size={im.size} dynamic={dynamic}')
+          print(f'PASS: Privora Boot Center 1.1 screenshot captured size={im.size} dynamic={dynamic}')
           PY
           rm -f "$PPM"
           CONTAINER
 
       - name: Upload Privora Boot Center visual evidence
-        if: always()
+        if: ${{ always() && inputs.certification == 'full' }}
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC4-v33-Boot-Center-Visual-Evidence
-          path: ${{ runner.temp }}/privora-build/output/PRIVORA-BOOT-CENTER-v33.png
+          name: Privora-4.0-RC4-v37-Boot-Center-Visual-Evidence
+          path: ${{ runner.temp }}/privora-build/output/PRIVORA-BOOT-CENTER-v37.png
           if-no-files-found: warn
           retention-days: 30
           compression-level: 6
 
-      - name: Certify BIOS, UEFI, and disposable installation
+      - name: Certify BIOS, UEFI, Live, Install, Recovery, Console, and installation
+        if: ${{ inputs.certification == 'full' }}
         shell: bash
         run: |
           set -euxo pipefail
@@ -360,20 +398,34 @@ jobs:
 
           QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" bios
           QEMU_TIMEOUT=600 ./ci/qemu-live-smoke.sh "$ISO" uefi
+
+          QEMU_MODE_TIMEOUT=420 ./ci/qemu-mode-smoke.sh "$ISO" live PRIVORA_PRISM_READY
+          QEMU_MODE_TIMEOUT=420 ./ci/qemu-mode-smoke.sh "$ISO" install PRIVORA_INSTALLER_READY
+          QEMU_MODE_TIMEOUT=360 ./ci/qemu-mode-smoke.sh "$ISO" recovery PRIVORA_RECOVERY_READY
+          QEMU_MODE_TIMEOUT=240 ./ci/qemu-mode-smoke.sh "$ISO" console PRIVORA_CONSOLE_READY
+
           QEMU_TIMEOUT=1200 ./installer/vm/run-install-core-certification.sh "$ISO"
 
-          cat > /work/output/CERTIFICATION.txt <<'EOF'
-          Privora 4.0 RC4 v33 — Privora Boot Center 1.0 & Modern Boot Core
-          Privora Prism Environment 1.2.1
+          cat > /work/output/CERTIFICATION-v37.txt <<'EOF'
+          Privora 4.0 RC4 v37 — Consolidated Boot, Desktop & Recovery
+          Privora Boot Center 1.1
+          Privora Prism Environment 1.3.0
           Boot core: Limine 12.5.2
 
-          Source identity: VERIFIED
-          Boot Center payload: VERIFIED
+          v34 Limine C-toolchain preflight: PASS
+          Source identity/static gates: PASS
+          Finished ISO Boot Center payload: PASS
           BIOS Limine ISO-hybrid live boot: PASS
           UEFI Limine ISO-hybrid live boot: PASS
-          Disposable UEFI install/write: PASS
+          v35 Live Prism mode marker: PASS
+          v35 Install mode marker: PASS
+          v35 Recovery mode marker: PASS
+          v35 Console mode marker: PASS
+          Disposable install/write: PASS
           Installed-system boot marker: PASS
-          Production Secure Boot trust chain: NOT CERTIFIED BY THIS WORKFLOW
+          v36 installed Privora Boot Center groundwork: PRESENT
+          GRUB installed-system fallback: PRESERVED
+          Production Secure Boot trust/integrity chain: NOT CERTIFIED
           EOF
           CONTAINER
 
@@ -382,28 +434,28 @@ jobs:
         shell: bash
         run: |
           cat > "$BUILDROOT/output/FLASH-TO-USB-WINDOWS.txt" <<'EOF'
-          Privora 4.0 RC4 v33 — Privora Boot Center 1.0 — Privora Prism 1.2.1
+          Privora 4.0 RC4 v37 — Boot Center 1.1 — Prism 1.3
 
           1. Verify the ISO against SHA256SUMS.txt.
-          2. Open Rufus on Windows.
-          3. Select Privora-4.0-rc4-Installer-privora-standard-amd64.iso.
-          4. Write the image to the USB drive; the selected USB is erased.
-          5. Boot the computer from that USB.
-          6. Privora Boot Center 1.0 is the primary BIOS/UEFI startup interface.
-          7. Use keyboard or pointer navigation when supported by firmware.
-          8. First-level choices are Install Privora, Try Privora Live, Recovery & Repair, Terminal / Console, and Advanced Options.
-          9. Advanced Options contains Compatibility Install, Persistence, Safe Graphics and Accessibility.
-          10. Try Privora Live is the 30-second default.
-          11. Console mode intentionally shows verbose kernel/systemd startup with no Plymouth splash.
-          12. Live normally autologs into Prism; fallback credentials are user `privora`, password `live`.
+          2. Open Rufus on Windows and select Privora-4.0-rc4-Installer-privora-standard-amd64.iso.
+          3. Write the image to the USB drive; the selected USB is erased.
+          4. Boot the computer from the USB.
+          5. Privora Boot Center 1.1 is the primary BIOS/UEFI startup interface.
+          6. Try Privora Live is the 30-second default.
+          7. Install, Live, Recovery and Terminal/Console are independent boot modes.
+          8. Console mode intentionally shows verbose kernel/systemd startup with no Plymouth splash.
+          9. Live normally autologs into Privora Prism; fallback Live credentials are user `privora`, password `live`.
+          10. Prism 1.3 uses the Privora P on the native application launcher; ordinary first-party apps use their own icons.
+          11. Restart/shutdown use Privora splash artwork without the boot progress bar.
+          12. v36 stages installed Privora Boot Center on UEFI while retaining GRUB as a recovery fallback.
           13. This development image does not claim production Secure Boot certification.
           EOF
 
-      - name: Upload certified Privora RC4 v33 ISO
-        if: success()
+      - name: Upload fully certified Privora RC4 v37 ISO
+        if: ${{ success() && inputs.certification == 'full' }}
         uses: actions/upload-artifact@v6
         with:
-          name: Privora-4.0-RC4-v33-Certified-Boot-Center-1.0-Prism-1.2.1-amd64
+          name: Privora-4.0-RC4-v37-Certified-Boot-Center-1.1-Prism-1.3-amd64
           path: ${{ runner.temp }}/privora-build/output/
           if-no-files-found: error
           retention-days: 30
