@@ -1,4 +1,4 @@
-name: Privora 4.0 RC4 v39 Rev3 — Resume Existing ISO Certification
+name: Privora 4.0 RC4 v39 Rev3 — Resume Existing ISO Certification v2
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ jobs:
     timeout-minutes: 120
 
     env:
-      SOURCE_ZIP: Privora-4.0-RC4-v39-Rev3-Systemd-Build-Context-Web-Source.zip
+      SOURCE_NAME: Privora-4.0-RC4-v39-Rev3-Systemd-Build-Context-Web-Source.zip
       SOURCE_SHA256: a7f6bb5d5e602de1344203d28eed10e42341b2137bfa92470a0a894fd760e981
       CANDIDATE_ARTIFACT: Privora-4.0-RC4-v39-Rev3-ISO-Candidate-Uncertified
       ISO_NAME: Privora-4.0-rc4-Installer-privora-standard-amd64.iso
@@ -22,26 +22,66 @@ jobs:
       - name: Check out repository
         uses: actions/checkout@v6
 
-      - name: Verify and unpack exact v39 Rev3 source
+      - name: Initialize resume workspace
         shell: bash
         run: |
           set -euxo pipefail
-          test -s "$SOURCE_ZIP"
-          echo "$SOURCE_SHA256  $SOURCE_ZIP" | sha256sum -c -
-
           BUILDROOT="$RUNNER_TEMP/privora-v39-rev3-resume"
           rm -rf "$BUILDROOT"
           mkdir -p "$BUILDROOT/src" "$BUILDROOT/output" "$BUILDROOT/logs"
-          unzip -q "$SOURCE_ZIP" -d "$BUILDROOT/src"
+          echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
+
+          {
+            echo 'Privora 4.0 RC4 v39 Rev3 — Existing ISO Certification Resume v2'
+            echo "started_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "candidate_artifact=$CANDIDATE_ARTIFACT"
+            echo 'status=initialized'
+          } > "$BUILDROOT/output/RESUME-STATUS.txt"
+
+      - name: Find, verify, and unpack exact v39 Rev3 source
+        shell: bash
+        run: |
+          set -euxo pipefail
+          STATUS="$BUILDROOT/output/RESUME-STATUS.txt"
+
+          SOURCE_PATH=$(find . -maxdepth 6 -type f -name "$SOURCE_NAME" -print -quit)
+          if [ -z "$SOURCE_PATH" ]; then
+            {
+              echo 'status=source-not-found'
+              echo "expected_source=$SOURCE_NAME"
+              echo 'nearby_zip_files:'
+              find . -maxdepth 6 -type f -name '*.zip' -printf '  %p\n' | sort | head -n 200
+            } | tee -a "$STATUS"
+            exit 41
+          fi
+
+          echo "source_path=$SOURCE_PATH" | tee -a "$STATUS"
+          actual=$(sha256sum "$SOURCE_PATH" | awk '{print $1}')
+          echo "source_sha256=$actual" | tee -a "$STATUS"
+          if [ "$actual" != "$SOURCE_SHA256" ]; then
+            {
+              echo 'status=source-sha256-mismatch'
+              echo "expected_sha256=$SOURCE_SHA256"
+              echo "actual_sha256=$actual"
+            } | tee -a "$STATUS"
+            exit 42
+          fi
+
+          unzip -t "$SOURCE_PATH" >/dev/null
+          unzip -q "$SOURCE_PATH" -d "$BUILDROOT/src"
 
           test "$(tr -d '\r\n' < "$BUILDROOT/src/VERSION")" = '4.0-rc4'
           test "$(tr -d '\r\n' < "$BUILDROOT/src/prism/VERSION")" = '1.3.1'
           test "$(tr -d '\r\n' < "$BUILDROOT/src/boot/privora-boot-center/VERSION")" = '1.2.0'
-          grep -Fq 'systemd-build-context-hotfix=v39-rev3'             "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
+          grep -Fq 'systemd-build-context-hotfix=v39-rev3' \
+            "$BUILDROOT/src/distro/config/includes.chroot/etc/privora/reconstruction"
 
           chmod -R u+rwX "$BUILDROOT/src"
           find "$BUILDROOT/src" -type f -name '*.sh' -exec chmod +x {} +
-          echo "BUILDROOT=$BUILDROOT" >> "$GITHUB_ENV"
+
+          echo 'status=source-verified' | tee -a "$STATUS"
 
       - name: Locate newest preserved v39 Rev3 ISO candidate
         id: artifact
@@ -50,32 +90,61 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euxo pipefail
-          response="$RUNNER_TEMP/v39-rev3-artifacts.json"
+          STATUS="$BUILDROOT/output/RESUME-STATUS.txt"
+          response="$BUILDROOT/logs/v39-rev3-artifacts.json"
 
-          gh api --method GET             -H 'Accept: application/vnd.github+json'             "/repos/${GITHUB_REPOSITORY}/actions/artifacts"             -f "name=$CANDIDATE_ARTIFACT"             -F per_page=100 > "$response"
+          gh api --method GET \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            -f "name=$CANDIDATE_ARTIFACT" \
+            -F per_page=100 > "$response"
 
-          python3 - "$response" "$CANDIDATE_ARTIFACT" "$GITHUB_OUTPUT" <<'PY'
+          if ! python3 - "$response" "$CANDIDATE_ARTIFACT" "$GITHUB_OUTPUT" "$STATUS" <<'PY'
           import json, sys
           from pathlib import Path
-          response, wanted, output = sys.argv[1:]
+
+          response, wanted, output, status = sys.argv[1:]
           data = json.loads(Path(response).read_text())
           candidates = [
               a for a in data.get('artifacts', [])
               if a.get('name') == wanted and not a.get('expired', False)
           ]
+
           if not candidates:
-              raise SystemExit(f"ERROR: no non-expired artifact named {wanted!r} was found")
+              with open(status, "a", encoding="utf-8") as f:
+                  f.write("status=candidate-artifact-not-found\n")
+                  f.write(f"expected_candidate={wanted}\n")
+              raise SystemExit(43)
+
           candidates.sort(key=lambda a: (a.get('created_at',''), int(a.get('id',0))))
           a = candidates[-1]
+
           print("Selected preserved ISO artifact:")
           print("  id:", a["id"])
+          print("  name:", a.get("name"))
           print("  created_at:", a.get("created_at"))
           print("  size_in_bytes:", a.get("size_in_bytes"))
           print("  workflow_run:", (a.get("workflow_run") or {}).get("id"))
+
           with open(output, "a", encoding="utf-8") as f:
               f.write(f"artifact_id={a['id']}\n")
               f.write(f"source_run_id={(a.get('workflow_run') or {}).get('id','')}\n")
+          with open(status, "a", encoding="utf-8") as f:
+              f.write("status=candidate-artifact-found\n")
+              f.write(f"candidate_artifact_id={a['id']}\n")
+              f.write(f"candidate_created_at={a.get('created_at','')}\n")
+              f.write(f"candidate_size={a.get('size_in_bytes','')}\n")
           PY
+          then
+            echo '--- Candidate lookup failed; recent relevant artifacts follow ---' | tee -a "$STATUS"
+            gh api --method GET \
+              -H 'Accept: application/vnd.github+json' \
+              "/repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+              -F per_page=100 \
+              --jq '.artifacts[] | select((.name|ascii_downcase|contains("v39")) or (.name|ascii_downcase|contains("privora"))) | [.id,.name,.expired,.created_at,.size_in_bytes] | @tsv' \
+              | head -n 100 | tee -a "$STATUS" || true
+            exit 43
+          fi
 
       - name: Download preserved v39 Rev3 ISO candidate
         shell: bash
@@ -97,6 +166,12 @@ jobs:
           test -s "$ISO"
           cp "$ISO" "$BUILDROOT/output/$ISO_NAME"
           sha256sum "$BUILDROOT/output/$ISO_NAME" | tee "$BUILDROOT/output/REUSED-ISO-SHA256.txt"
+          {
+            echo 'status=iso-downloaded'
+            echo "iso_path=$BUILDROOT/output/$ISO_NAME"
+            echo "iso_bytes=$(stat -c %s "$BUILDROOT/output/$ISO_NAME")"
+          } >> "$BUILDROOT/output/RESUME-STATUS.txt"
+          find "$BUILDROOT/output" -maxdepth 1 -type f -printf '%f %s bytes\n' | sort             | tee "$BUILDROOT/logs/output-after-download.txt"
 
       - name: Start Debian 13 certification container
         shell: bash
@@ -425,7 +500,7 @@ jobs:
         with:
           name: Privora-4.0-RC4-v39-Rev3-Boot-Center-Visual-Evidence-Resumed
           path: ${{ runner.temp }}/privora-v39-rev3-resume/output/PRIVORA-BOOT-CENTER-v39-REV3.png
-          if-no-files-found: warn
+          if-no-files-found: ignore
           retention-days: 30
           compression-level: 6
 
@@ -487,9 +562,25 @@ jobs:
         with:
           name: Privora-4.0-RC4-v39-Rev3-Installer-Visual-Evidence-Resumed
           path: ${{ runner.temp }}/privora-v39-rev3-resume/output/PRIVORA-INSTALLER-v39-REV3.png
-          if-no-files-found: warn
+          if-no-files-found: ignore
           retention-days: 30
           compression-level: 6
+
+      - name: Record resume diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          BUILDROOT="${BUILDROOT:-$RUNNER_TEMP/privora-v39-rev3-resume}"
+          mkdir -p "$BUILDROOT/output" "$BUILDROOT/logs"
+          {
+            echo "finished_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "job_status=${{ job.status }}"
+            echo 'output_inventory:'
+            find "$BUILDROOT/output" -maxdepth 2 -type f -printf '  %p %s bytes\n' | sort
+            echo 'log_inventory:'
+            find "$BUILDROOT/logs" -maxdepth 2 -type f -printf '  %p %s bytes\n' | sort
+          } >> "$BUILDROOT/output/RESUME-STATUS.txt"
 
       - name: Upload resumed v39 Rev3 certification results
         if: always()
